@@ -121,6 +121,8 @@ into numbers, `model.py` fits a ridge polynomial from them to the screen (the `e
 set drives the pointer), `track.py` turns gaze and head into pointer moves, sent
 straight on dune's socket (`pointer\tmove\tX\tY\tOUTPUT`, what `dune pointer move` sends);
 `snap.py` asks `dune-a11y serve` which button a jump should land on.
+[docs/click-model.md](docs/click-model.md): how a model of where clicks go is trained on
+the clicks of use (the data kept, how it is checked, the stages, what was found).
 
 ## Tests
 
