@@ -220,3 +220,11 @@ def test_action_speaks_dunes_protocol(tmp_path, monkeypatch):
     assert conn.recv(100) == b"action\tfocus_left"
     conn.close()
     server.close()
+
+
+def test_the_gaze_on_the_zoom_is_mapped_back_to_real_pixels():
+    zoom = {"x": 800, "y": 400, "scale": 3, "area_x": 0, "area_y": 0, "area_w": 1600, "area_h": 900}
+    assert track.unzoom((860, 370), zoom).tolist() == [820, 390]
+    assert track.unzoom((800, 400), zoom).tolist() == [800, 400]
+    assert track.unzoom((2000, 370), zoom).tolist() == [2000, 370]  # outside the zoomed tile: as it is
+    assert list(track.unzoom((860, 370), None)) == [860, 370]

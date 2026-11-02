@@ -187,10 +187,30 @@ def context(event: dict) -> dict | None:
     return {k: event[k] for k in CONTEXT}
 
 
+def seen(event: dict) -> tuple[int, int, dict | None]:
+    """Where a click was seen, and its context: while dune's zoom was in (`zoom_x`...) the
+    eyes were on the magnified point, not on the real one (x, y), which goes in the context
+    with the scale; else (x, y) itself."""
+    ctx = context(event)
+    if "zoom_x" not in event:
+        return event["x"], event["y"], ctx
+    zoomed = {"real_x": event["x"], "real_y": event["y"], "zoom_scale": event.get("zoom_scale")}
+    return event["zoom_x"], event["zoom_y"], (ctx or {}) | zoomed
+
+
+def zoom_of(event: dict) -> dict | None:
+    """A `zoom` `in` line: center, scale and area (monitor coordinates); None for `out`."""
+    if event.get("change") != "in":
+        return None
+    keys = ("x", "y", "scale", "area_x", "area_y", "area_w", "area_h")
+    return {k: event[k] for k in keys} if all(k in event for k in keys) else None
+
+
 class Clicks(threading.Thread):
-    """`dune events pointer`, in the background: ("click", time heard, x, y, output, the
-    tile it was on) of each left or right click on a queue, and ("move", ..., None) as the
-    mouse moves the pointer."""
+    """`dune events pointer,zoom`, in the background: ("click", time heard, x, y, output,
+    the tile it was on) of each left or right click on a queue, (x, y) where it was seen;
+    ("move", ..., None) as the mouse moves the pointer; ("zoom", t, 0, 0, output, the zoom
+    or None) as dune's zoom goes in or out."""
 
     def __init__(self):
         super().__init__(daemon=True)
@@ -199,7 +219,7 @@ class Clicks(threading.Thread):
 
     def run(self):
         try:
-            self.proc = subprocess.Popen(["dune", "events", "pointer"], stdout=subprocess.PIPE, text=True)
+            self.proc = subprocess.Popen(["dune", "events", "pointer,zoom"], stdout=subprocess.PIPE, text=True)
         except OSError:
             return
         for line in self.proc.stdout:
@@ -208,12 +228,15 @@ class Clicks(threading.Thread):
                 e = json.loads(line)
             except ValueError:
                 continue
+            if e.get("event") == "zoom" and "output" in e:
+                self.queue.put(("zoom", t, 0, 0, e["output"], zoom_of(e)))
+                continue
             if e.get("event") != "pointer":
                 continue
             if e.get("change") == "move":
                 self.queue.put(("move", t, e["x"], e["y"], e["output"], None))
             elif e.get("button") in ("left", "right"):
-                self.queue.put(("click", t, e["x"], e["y"], e["output"], context(e)))
+                self.queue.put(("click", t, *seen(e)[:2], e["output"], seen(e)[2]))
 
     def pending(self):
         while True:

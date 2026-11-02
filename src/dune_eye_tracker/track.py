@@ -225,6 +225,20 @@ class Pointer:
         return False
 
 
+def unzoom(gaze, zoom: dict | None):
+    """Where a gaze on the screen is in real coordinates: inside the area dune magnifies
+    (`zoom`, from a `zoom` line) the point seen there, C + (g − C)/scale; elsewhere (or
+    not zoomed) itself."""
+    if zoom is None:
+        return gaze
+    g = np.asarray(gaze, dtype=float)
+    x0, y0 = zoom["area_x"], zoom["area_y"]
+    if not (x0 <= g[0] < x0 + zoom["area_w"] and y0 <= g[1] < y0 + zoom["area_h"]):
+        return g
+    c = np.array([zoom["x"], zoom["y"]], dtype=float)
+    return c + (g - c) / zoom["scale"]
+
+
 class Filter2:
     """A One Euro filter on each of two numbers."""
 
@@ -323,6 +337,7 @@ def run(args) -> int:
     if near is not None:
         near.start()
     asked = 0  # the last jump `near` was asked about
+    zoom = None  # dune's zoom on this monitor while it is in (a `zoom` line)
     # with the head calibration the gaze already counts the head: "off the screen" too
     pointer = Pointer(
         size,
@@ -374,6 +389,15 @@ def run(args) -> int:
                 if args.verbose:
                     print(f"put {x} {y} (dune-a11y)", flush=True)
             for change, t, x, y, out, ctx in clicks.pending():
+                if change == "zoom":
+                    if out == output:
+                        # magnified: the gaze mapped back, the head and the jumps 1/scale
+                        zoom = ctx
+                        z = zoom["scale"] if zoom else 1
+                        pointer.gain, pointer.jump = args.head_gain / z, JUMP / z
+                        if args.verbose:
+                            print(f"zoom {'in x' + str(z) if zoom else 'out'}", flush=True)
+                    continue
                 if change == "move":
                     pointer.hand(t, (x, y) if out == output else None)
                     continue
@@ -401,8 +425,8 @@ def run(args) -> int:
                 for seq, onto in near.answers():  # where a jump should have landed
                     if onto is not None and pointer.snap_to(seq, onto) and args.verbose:
                         print(f"jump {seq} onto {onto[0]:.0f} {onto[1]:.0f}", flush=True)
-            px = pointer.update(sample.t, gaze, head)
-            if near is not None and pointer.landings != asked and pointer.landed is not None:
+            px = pointer.update(sample.t, unzoom(gaze, zoom), head)
+            if near is not None and zoom is None and pointer.landings != asked and pointer.landed is not None:
                 asked = pointer.landings  # a new jump: what is there? (answered in a few ms)
                 near.ask(asked, *pointer.landed)
             if pointer.released != was_released:

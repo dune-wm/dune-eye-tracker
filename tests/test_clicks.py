@@ -109,3 +109,22 @@ def test_the_tile_a_click_was_on_is_kept_with_it(tmp_path):
     saved = json.loads(path.read_text())["click_samples"]
     assert all(s["ctx"] == ctx for s in saved if s["point"] == saved[0]["point"])
     assert not any("ctx" in s for s in saved if s["point"] != saved[0]["point"])
+
+
+def test_a_click_while_zoomed_is_learnt_where_it_was_seen():
+    line = {"event": "pointer", "change": "click", "button": "left", "x": 820, "y": 390, "output": "M",
+            "tile": 3, "app_id": "foot", "tile_x": 814, "tile_y": 384, "tile_w": 938, "tile_h": 1054,
+            "zoom_x": 860, "zoom_y": 370, "zoom_scale": 3}
+    x, y, ctx = clicks.seen(line)
+    assert (x, y) == (860, 370)  # the eyes were on the magnified point
+    assert ctx["real_x"] == 820 and ctx["real_y"] == 390 and ctx["zoom_scale"] == 3
+    assert ctx["app_id"] == "foot" and ctx["tile_x"] == 814  # the window's, real
+    plain = {k: v for k, v in line.items() if not k.startswith("zoom")}
+    assert clicks.seen(plain)[:2] == (820, 390)
+
+
+def test_zoom_lines():
+    zin = {"event": "zoom", "change": "in", "output": "M", "x": 800, "y": 400, "scale": 3, "tile": 1,
+           "area_x": 6, "area_y": 6, "area_w": 938, "area_h": 1054}
+    assert clicks.zoom_of(zin) == {"x": 800, "y": 400, "scale": 3, "area_x": 6, "area_y": 6, "area_w": 938, "area_h": 1054}
+    assert clicks.zoom_of({"event": "zoom", "change": "out", "output": "M"}) is None

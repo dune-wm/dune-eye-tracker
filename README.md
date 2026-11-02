@@ -58,6 +58,14 @@ voice ("click reply", dune-a11y) puts the pointer on what it clicked, through
 `$XDG_RUNTIME_DIR/dune-eye-tracker.sock`: it stays there, as after the mouse, until you
 look elsewhere (and teaches nothing: it is not where you looked).
 
+**Zoom for the last pixels.** dune's `zoom` key (Mod+z, or saying "zoom") magnifies the
+tile under the pointer 3x around it. While it is in, the gaze on the magnified tile is
+mapped back to real pixels (`unzoom`: C + (g − C)/3), the head moves the pointer a third
+as fast and a jump takes a third of the distance, so the last pixels are three times
+finer; no button landing meanwhile. The key again (or "click", or any click) clicks there
+and goes out. A click made while zoomed is learnt where it was seen (`zoom_x`, `zoom_y`:
+where the eyes were), the real point kept in its `ctx`.
+
 How it moves: the gaze gets the pointer near (a webcam is ~3° off, ~120 px): when you
 look more than 300 px away from the pointer for 0.15 s, it jumps there. Between jumps the
 head moves it from where it landed: turn it a little for the last few pixels (1200 px per
