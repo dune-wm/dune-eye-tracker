@@ -136,6 +136,10 @@ def degrees(px: float, px_per_cm: float, distance_cm: float) -> float:
 
 # What the head adds to the eyes model, from where it was at the eyes' calibration.
 HEAD_COLUMNS = ("head_x", "head_y", "pos_x", "pos_y")
+# What a fix is fitted on now: the head, and how open the eyes are (looking down the lids
+# close and the iris reads higher than it is: +0.38 with the vertical miss on 400 clicks,
+# 219 -> 197 px each click left out). A fix saved before has the head only.
+FIX_COLUMNS = HEAD_COLUMNS + ("open",)
 
 
 @dataclass
@@ -146,13 +150,14 @@ class HeadFix:
     `gaze_mid` (learnt from clicks, all over the screen) it also straightens the eyes'
     own guess (pulled towards the middle, say), linearly."""
 
-    ref: np.ndarray  # (4,) the head's place at the eyes' calibration
+    ref: np.ndarray  # (n,) the head's place (and the eyes' openness) at the eyes' calibration
     bias: np.ndarray  # (2,)
-    weights: np.ndarray  # (4, 2), or (6, 2) with the gaze terms
+    weights: np.ndarray  # (n, 2), or (n + 2, 2) with the gaze terms
     gaze_mid: np.ndarray | None = None  # (2,) the screen's middle: gaze terms are (guess - mid) / mid
+    names: tuple[str, ...] = HEAD_COLUMNS  # the n features, as `ref`
 
     def columns(self, eyes: np.ndarray, rows: list[dict[str, float]]) -> np.ndarray:
-        d = np.array([[r[c] for c in HEAD_COLUMNS] for r in rows], dtype=float) - self.ref
+        d = np.array([[r[c] for c in self.names] for r in rows], dtype=float) - self.ref
         if self.gaze_mid is not None:
             d = np.column_stack([d, (eyes - self.gaze_mid) / self.gaze_mid])
         return d
@@ -161,7 +166,7 @@ class HeadFix:
         return eyes + self.bias + self.columns(eyes, rows) @ self.weights
 
     def to_json(self) -> dict:
-        out = {"ref": self.ref.tolist(), "bias": self.bias.tolist(), "weights": self.weights.tolist()}
+        out = {"ref": self.ref.tolist(), "bias": self.bias.tolist(), "weights": self.weights.tolist(), "columns": list(self.names)}
         if self.gaze_mid is not None:
             out["gaze_mid"] = self.gaze_mid.tolist()
         return out
@@ -169,7 +174,8 @@ class HeadFix:
     @classmethod
     def from_json(cls, d: dict) -> "HeadFix":
         mid = np.array(d["gaze_mid"]) if d.get("gaze_mid") is not None else None
-        return cls(np.array(d["ref"]), np.array(d["bias"]), np.array(d["weights"]), mid)
+        names = tuple(d.get("columns") or HEAD_COLUMNS)  # saved before `columns`: the head only
+        return cls(np.array(d["ref"]), np.array(d["bias"]), np.array(d["weights"]), mid, names)
 
 
 HEAD_LAMBDAS = (1e-3, 1e-2, 1e-1, 1.0, 10.0)
@@ -187,11 +193,13 @@ def fit_head(
     screen's, the gaze terms too), and how it does on each point left out: (fix, eyes
     alone, with the fix), each the median over the points of the mean distance of a guess
     from it (px)."""
-    ref_v = np.array([ref[c] for c in HEAD_COLUMNS], dtype=float)
+    names = FIX_COLUMNS
+    # the calibration keeps the head's place; the openness it did not: the samples' own
+    ref_v = np.array([ref[c] if c in ref else float(np.median([r[c] for r in rows])) for c in names], dtype=float)
     mid = None if size is None else np.array(size, dtype=float) / 2
     guess = eyes.predict(rows)
     residual = targets - guess
-    d = HeadFix(ref_v, np.zeros(2), np.zeros((4, 2)), mid).columns(guess, rows)
+    d = HeadFix(ref_v, np.zeros(2), np.zeros((len(names), 2)), mid, names).columns(guess, rows)
     scale = d.std(axis=0)
     scale[scale < 1e-9] = 1.0
     a = np.column_stack([np.ones(len(d)), d / scale])
@@ -210,7 +218,7 @@ def fit_head(
     best = min(HEAD_LAMBDAS, key=lambda lam: float(np.mean(point_errors(lam)[1])))
     alone, fixed = point_errors(best)
     w = ridge(a, residual, best)
-    fix = HeadFix(ref_v, w[0], w[1:] / scale[:, None], mid)
+    fix = HeadFix(ref_v, w[0], w[1:] / scale[:, None], mid, names)
     return fix, float(np.median(alone)), float(np.median(fixed))
 
 

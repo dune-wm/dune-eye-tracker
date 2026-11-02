@@ -35,12 +35,14 @@ def main(argv: list[str] | None = None) -> int:
     head = sub.add_parser("calibrate-head", help="after `calibrate`: 5 points looked at while the head turns, for `run`")
     window(head)
 
+    from .snap import SNAP
     from .track import GLIDE, HEAD_GAIN
 
     run = sub.add_parser("run", help="move the pointer where you look, until stopped")
     camera(run)
     run.add_argument("--head-gain", type=float, default=HEAD_GAIN, help=f"px per unit of head turn (default {HEAD_GAIN:g})")
     run.add_argument("--glide", type=float, default=GLIDE, help=f"s the pointer takes to glide most of the way (default {GLIDE:g}; 0: no glide)")
+    run.add_argument("--snap", type=float, default=SNAP, help=f"px within which a jump lands on a button, link or tab (dune-a11y; default {SNAP:g}; 0: on the gaze)")
     run.add_argument("-v", "--verbose", action="store_true", help="fps and moves every second")
 
     sub.add_parser("toggle", help="start `run` in the background, or stop it (`calibrate` when there is no calibration)")

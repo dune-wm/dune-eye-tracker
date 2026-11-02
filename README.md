@@ -21,8 +21,15 @@ is better (then "off the screen" comes from it too). A new `calibrate` drops it.
 While `run` goes, **every click teaches it** (look at the pointer when you click): it
 hears them from `dune events pointer` (the mouse's, and dune-voice's "click"), keeps the
 camera's samples from just before a click on the calibrated monitor when the gaze was
-steady, wherever it guessed you looked (it trusts you look at the pointer), and every 5 clicks (the first after 10) fits a fix (head
-and gaze, `clicks.py`) on them, used when it does no worse on the last 5 clicks. `-v`
+steady, wherever it guessed you looked (it trusts you look at the pointer), and every 5 clicks (the first after 10) fits a fix (head,
+gaze and how open the eyes are, `clicks.py`) on them, used when it does no worse on the
+last 50 clicks (half of them while there are fewer; up to 15% worse still counts, as the
+fix in use has seen most of them). The eyes' openness counts because looking down the lids close and the iris
+reads higher than it is (on 400 clicks: 221 px off without it, 193 with it, each click
+left out); a fix learnt before it keeps working until the next fit replaces it. With a dune from
+2026-11-02 on, each click also keeps the tile it was on: its app, where in it and its size
+(`ctx` in `click_samples`). Nothing uses it yet: it is the data for learning where clicks
+go inside each app's window, which stays put while the strip slides. `-v`
 prints each click and why it was kept or not; the fits are always in the log. A new
 `calibrate` drops them.
 
@@ -39,10 +46,21 @@ Then `dune-eye-tracker toggle` starts it in the background, and again stops it (
 calibration it opens `calibrate`. `dune-eye-tracker run [-v] [--head-gain PX]` is the
 same in the foreground.
 
+**Landing on buttons.** With [dune-a11y](../dune-a11y) installed, a jump lands on the
+middle of the button, link, tab or menu item nearest where you look (within 90 px,
+`--snap PX`; 0: off), from the apps' accessibility trees (`dune-a11y watch OUTPUT`, the
+visible tiles of the calibrated monitor, read every second and when a tile moves). In a
+field or a list (wider or taller than 160 px) it stays where you look, inside it. The
+head still moves it from there. Apps show their tree only with accessibility on
+(`dune-a11y enable`, which `dune-session` runs); floating windows have none. A click by
+voice ("click reply", dune-a11y) puts the pointer on what it clicked, through
+`$XDG_RUNTIME_DIR/dune-eye-tracker.sock`: it stays there, as after the mouse, until you
+look elsewhere (and teaches nothing: it is not where you looked).
+
 How it moves: the gaze gets the pointer near (a webcam is ~3° off, ~120 px): when you
 look more than 300 px away from the pointer for 0.15 s, it jumps there. Between jumps the
-head moves it from where it landed: turn it a little for the last few pixels (2000 px per
-unit of head turn: 3° ≈ 100 px, `--head-gain`). Gaze and head go through One Euro
+head moves it from where it landed: turn it a little for the last few pixels (1200 px per
+unit of head turn: 3° ≈ 60 px, slow to land on a point; `--head-gain`). Gaze and head go through One Euro
 filters, and the pointer glides where they take it (`--glide`, 0.1 s; 0: put there).
 Turning the head to one side further than looking at the screen takes it (the eyes can
 stay on the screen) steps the strip one tile that way (`dune action focus_left` /
@@ -92,7 +110,8 @@ MediaPipe Face Landmarker (the model in `~/.cache/dune-eye-tracker/face_landmark
 gives 478 points of the face, irises included, and its pose; `features.py` turns them
 into numbers, `model.py` fits a ridge polynomial from them to the screen (the `eyes`
 set drives the pointer), `track.py` turns gaze and head into pointer moves, sent
-straight on dune's socket (`pointer\tmove\tX\tY\tOUTPUT`, what `dune pointer move` sends).
+straight on dune's socket (`pointer\tmove\tX\tY\tOUTPUT`, what `dune pointer move` sends);
+`snap.py` follows `dune-a11y watch` and tells a jump which button to land on.
 
 ## Tests
 

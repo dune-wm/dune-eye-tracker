@@ -32,10 +32,11 @@ from . import model
 from .clicks import ClickLearner, Clicks
 from .features import BLINK, Camera
 from .measure import calibration_path, state_dir
+from .snap import Puts, Targets
 
 JUMP = 300.0  # px between gaze and pointer that make it jump
 JUMP_TIME = 0.15  # s the gaze stays that far first (not one wild frame)
-HEAD_GAIN = 2000.0  # px per unit of head turn (0.05, about 3°: 100 px)
+HEAD_GAIN = 1200.0  # px per unit of head turn (0.05, about 3°: 60 px): slow, for the last pixels
 AWAY = 150.0  # px past an edge of the screen the gaze is "off it"
 AWAY_TIME = 0.3  # s it stays there before the pointer is let go
 HAND_TIME = 0.5  # s after the mouse last moved during which the pointer is the hand's
@@ -81,6 +82,7 @@ class Pointer:
         hand_time: float = HAND_TIME,
         glide: float = 0.0,
         step_at: tuple[float, float] | None = None,
+        snap=None,
     ):
         self.size = np.array(size, dtype=float)
         self.jump, self.jump_time, self.gain = jump, jump_time, head_gain
@@ -106,6 +108,9 @@ class Pointer:
         self.step_at = step_at or (ref + STEP_TURN, ref - STEP_TURN)
         self.step = 0  # a tile to step this frame: -1 left, 1 right, 0 none
         self.turned = 0  # stepped that way: the head has to come back first
+        # where a jump to a gaze lands instead (the nearest button: `snap.Targets`), None
+        # to land on the gaze
+        self.snap = snap
 
     def hand(self, t: float, xy):
         """The mouse moved the pointer to `xy` on this monitor (None: on another one)."""
@@ -183,6 +188,8 @@ class Pointer:
 
     def land(self, gaze, head):
         self.landed = np.clip(gaze, 0, self.size - 1)
+        if self.snap is not None and (onto := self.snap(self.landed)) is not None:
+            self.landed = np.clip(np.asarray(onto, dtype=float), 0, self.size - 1)
         self.at, self.head0, self.far_since = self.landed.copy(), head, None
 
     def follow(self, head):
@@ -301,6 +308,10 @@ def run(args) -> int:
     camera.start()
     ref = data.get("head") or {}
     fix = head_fix(data)
+    targets = None
+    if args.snap > 0 and output:
+        targets = Targets(output, args.snap)
+        targets.start()
     # with the head calibration the gaze already counts the head: "off the screen" too
     pointer = Pointer(
         size,
@@ -309,11 +320,15 @@ def run(args) -> int:
         head_screen=0.0 if fix else HEAD_SCREEN,
         glide=args.glide,
         step_at=step_turns(data),
+        snap=targets,
     )
     gaze_f, head_f = Filter2(GAZE_FILTER), Filter2(HEAD_FILTER)
     learner = ClickLearner(data, eyes, fix, path)
     clicks = Clicks()
     clicks.start()
+    puts = Puts(output) if output else None
+    if puts is not None:
+        puts.start()
     last_seq, moves, since = 0, 0, time.monotonic()
     if data.get("click_fix"):
         c = data["click_fix"]
@@ -323,6 +338,9 @@ def run(args) -> int:
     else:
         with_head = ""
     print(f"driving the pointer on {output} ({size[0]}x{size[1]}); calibrated {data['time']}{with_head}", flush=True)
+    if targets is not None:
+        targets.join(timeout=0.5)  # not found: it says so at once
+        print(targets.error or f"landing on buttons within {args.snap:g} px (dune-a11y)", flush=True)
     left, right = pointer.step_at
     print(f"a tile left with head_x past {left:+.2f}, right past {right:+.2f}", flush=True)
     try:
@@ -335,18 +353,29 @@ def run(args) -> int:
                 time.sleep(0.005)
                 continue
             last_seq = sample.seq
-            for change, t, x, y, out in clicks.pending():
+            for _, t, x, y in puts.pending() if puts is not None else ():
+                # dune-a11y clicked something there (by voice): the pointer onto it, left
+                # there as the mouse leaves it, until you look elsewhere
+                pointer.hand(t, (x, y))
+                try:
+                    move(x, y, output)
+                except OSError as e:
+                    print(f"cannot reach dune: {e}", file=sys.stderr)
+                    return 1
+                if args.verbose:
+                    print(f"put {x} {y} (dune-a11y)", flush=True)
+            for change, t, x, y, out, ctx in clicks.pending():
                 if change == "move":
                     pointer.hand(t, (x, y) if out == output else None)
                     continue
-                said = learner.click(t, x, y, out)
+                said = learner.click(t, x, y, out, ctx)
                 if args.verbose:
                     print(f"click {x} {y} {out}: {said}", flush=True)
-                if note := learner.refit():
-                    print(note, flush=True)
-                    if learner.fix is not fix:  # the new fix: gaze, and "off the screen", from it
-                        fix = learner.fix
-                        pointer.head_screen = 0.0
+            if note := learner.refit_background():  # fits in a thread: the pointer goes on
+                print(note, flush=True)
+                if learner.fix is not fix:  # the new fix: gaze, and "off the screen", from it
+                    fix = learner.fix
+                    pointer.head_screen = 0.0
             feats = sample.feats
             if feats is None:
                 continue
@@ -380,6 +409,10 @@ def run(args) -> int:
                 moves, since = 0, sample.t
     finally:
         clicks.stop()
+        if puts is not None:
+            puts.stop()
+        if targets is not None:
+            targets.stop()
         if learner.kept:
             learner.save()
         camera.stop()

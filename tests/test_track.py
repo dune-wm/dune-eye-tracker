@@ -24,7 +24,7 @@ def test_gaze_near_keeps_it_and_the_head_moves_it():
 
 
 def test_far_gaze_jumps_only_when_it_stays():
-    p = track.Pointer(SIZE, jump=300, jump_time=0.15)
+    p = track.Pointer(SIZE, jump=300, jump_time=0.15, head_gain=2000)
     p.update(0.0, (500, 500), (0, 0))
     assert p.update(0.03, (2000, 500), (0, 0)) is None  # one frame far: stays
     assert p.update(0.10, (2000, 500), (0, 0)) is None
@@ -42,7 +42,7 @@ def test_far_then_back_near_does_not_jump():
 
 
 def test_the_mouse_takes_the_pointer_until_the_gaze_moves_away():
-    p = track.Pointer(SIZE, jump=300, jump_time=0.15, hand_time=0.5)
+    p = track.Pointer(SIZE, jump=300, jump_time=0.15, hand_time=0.5, head_gain=2000)
     p.update(0.0, (500, 500), (0, 0))
     # the hand moves it to where you look; the gaze guess is 400 px off from there
     p.hand(1.0, (900, 500))

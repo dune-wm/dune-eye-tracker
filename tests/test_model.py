@@ -117,3 +117,39 @@ def test_head_fix_learns_what_turning_the_head_does():
     assert fixed < alone / 3
     back = model.HeadFix.from_json(fix.to_json())
     assert np.allclose(back.correct(np.zeros((1, 2)), rows[:1]), fix.correct(np.zeros((1, 2)), rows[:1]))
+
+
+def test_a_fix_saved_before_openness_still_loads_and_corrects():
+    old = {"ref": [0.0, 0.0, 0.0, 0.0], "bias": [10.0, -5.0], "weights": [[100.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]}
+    fix = model.HeadFix.from_json(old)
+    assert fix.names == model.HEAD_COLUMNS
+    row = {"head_x": 0.1, "head_y": 0.0, "pos_x": 0.0, "pos_y": 0.0, "open": 0.3}
+    assert np.allclose(fix.correct(np.zeros((1, 2)), [row]), [[20.0, -5.0]])
+
+
+def test_the_fix_learns_what_closing_the_eyes_does():
+    # looking down the lids close and the iris reads higher: the openness tells it
+    rng = np.random.default_rng(5)
+    size = (2560, 1080)
+    cal_rows, cal_t, cal_g = [], [], []
+    for i, (x, y) in enumerate(CALIBRATION):
+        for _ in range(20):
+            cal_rows.append(fake_feats(x, y, rng, 0.001) | {"open": 0.27})
+            cal_t.append((x * size[0], y * size[1]))
+            cal_g.append(i)
+    eyes = model.fit(cal_rows, np.array(cal_t), np.array(cal_g), "eyes")
+    ref = dict.fromkeys(model.HEAD_COLUMNS, 0.0)
+    rows, targets, groups = [], [], []
+    for i, (x, y) in enumerate([(0.5, 0.5), (0.2, 0.25), (0.8, 0.25), (0.2, 0.75), (0.8, 0.75), (0.5, 0.9)]):
+        for op in np.linspace(0.20, 0.34, 8):
+            f = fake_feats(x, y, rng, 0.001)
+            f |= {"open": op, "eye_v": f["eye_v"] - 0.8 * (0.27 - op)}  # less open: reads higher
+            rows.append(f)
+            targets.append((x * size[0], y * size[1]))
+            groups.append(i)
+    fix, alone, fixed = model.fit_head(eyes, rows, np.array(targets), np.array(groups), ref, size)
+    assert fix.names == model.FIX_COLUMNS
+    assert fixed < alone / 2
+    back = model.HeadFix.from_json(fix.to_json())
+    assert back.names == fix.names
+    assert np.allclose(back.correct(np.zeros((2, 2)), rows[:2]), fix.correct(np.zeros((2, 2)), rows[:2]))

@@ -69,3 +69,43 @@ def test_clicks_learn_what_the_calibration_got_wrong(tmp_path):
     saved = json.loads(path.read_text())
     assert len({s["point"] for s in saved["click_samples"]}) == 40
     assert model.HeadFix.from_json(saved["click_fix"]).gaze_mid is not None
+
+
+def test_a_fit_in_the_background_lands_later_and_the_clicks_go_on(tmp_path):
+    rng = np.random.default_rng(6)
+    data, eyes = calibration(rng)
+    learner = clicks.ClickLearner(data, eyes, None, tmp_path / "c.json")
+    t, notes = 0.0, []
+    for i in range(12):
+        x, y = rng.uniform(200, 2360), rng.uniform(150, 930)
+        t = look(learner, t, x, y, rng, drift=(0.06, -0.05))
+        learner.click(t, int(x), int(y), "HDMI-A-1")
+        if note := learner.refit_background():
+            notes.append(note)
+        t += 1.0
+    assert learner.job is not None  # due at 10 clicks: started, not waited for
+    learner.job.join(timeout=10)
+    note = learner.refit_background()  # done: put in use
+    assert note.startswith("10 clicks: on the last 5")  # the clicks as they were when it started
+    assert learner.job is None and learner.fix is not None
+    assert (tmp_path / "c.json").exists()
+
+
+def test_the_tile_a_click_was_on_is_kept_with_it(tmp_path):
+    rng = np.random.default_rng(7)
+    data, eyes = calibration(rng)
+    path = tmp_path / "c.json"
+    learner = clicks.ClickLearner(data, eyes, None, path)
+    line = {"event": "pointer", "change": "click", "button": "left", "x": 812, "y": 440, "output": "HDMI-A-1",
+            "tile": 3, "app_id": "vivaldi-stable", "tile_x": 200, "tile_y": 96, "tile_w": 1268, "tile_h": 1064}
+    ctx = clicks.context(line)
+    assert ctx == {"tile": 3, "app_id": "vivaldi-stable", "tile_x": 200, "tile_y": 96, "tile_w": 1268, "tile_h": 1064}
+    assert clicks.context({"event": "pointer", "change": "click", "x": 1, "y": 2, "output": "M"}) is None  # an older dune
+    t = look(learner, 0.0, 812, 440, rng)
+    assert learner.click(t, 812, 440, "HDMI-A-1", ctx).startswith("kept")
+    t = look(learner, 1.0, 900, 500, rng)
+    assert learner.click(t, 900, 500, "HDMI-A-1").startswith("kept")  # off a tile: none
+    learner.save()
+    saved = json.loads(path.read_text())["click_samples"]
+    assert all(s["ctx"] == ctx for s in saved if s["point"] == saved[0]["point"])
+    assert not any("ctx" in s for s in saved if s["point"] != saved[0]["point"])
