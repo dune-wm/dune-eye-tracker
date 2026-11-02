@@ -44,10 +44,13 @@ look more than 300 px away from the pointer for 0.15 s, it jumps there. Between 
 head moves it from where it landed: turn it a little for the last few pixels (2000 px per
 unit of head turn: 3° ≈ 100 px, `--head-gain`). Gaze and head go through One Euro
 filters, and the pointer glides where they take it (`--glide`, 0.1 s; 0: put there).
-Looking at the left or right edge and turning the head on that way pushes the edge as the
-mouse would: the strip of tiles slides (the more the head is turned, the faster; back,
-it stops). With a fix from clicks or `calibrate-head` only (else a turned head reads as
-looking off the screen). Without a face, or blinking, the pointer stays. Looking off the screen (150 px
+Turning the head to one side further than looking at the screen takes it (the eyes can
+stay on the screen) steps the strip one tile that way (`dune action focus_left` /
+`focus_right`: the tile is focused and shown); the pointer stays while the head is turned,
+and the next tile waits for the head to come back towards the middle, then lands where
+you look. How far: past the 1% most turned of your clicks (with 200 or more), else 0.35
+of `head_x` from the calibration; the log says it at start, and `-v` shows `head_x` every
+second and each step. Without a face, or blinking, the pointer stays. Looking off the screen (150 px
 past an edge for 0.3 s, the head's turn counted: the monitor below, the keyboard) lets
 go of the pointer for the mouse; looking back well on the screen takes it again. Clicks: the mouse, for now.
 The camera serves one program at a time: close dune-camera first; the log is

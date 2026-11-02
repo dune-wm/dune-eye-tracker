@@ -42,13 +42,15 @@ HAND_TIME = 0.5  # s after the mouse last moved during which the pointer is the 
 # s: the pointer glides to where it goes (a jump, the head) instead of being put there,
 # most of the way (63%) in this time; 0: put there
 GLIDE = 0.1
-# Looking at the left or right edge (`EDGE_GAZE` px from it) and turning the head on that
-# way, past where it takes the pointer (`PUSH_DEAD` px beyond the edge), pushes the edge as
-# a mouse would (`dune pointer by`): dune slides the strip of tiles. `PUSH_RATE` px pushed
-# a second per px the head is past.
-EDGE_GAZE = 300.0
-PUSH_DEAD = 20.0
-PUSH_RATE = 4.0
+# Turning the head to one side further than looking at the screen takes it (the eyes may
+# stay on the screen) steps the strip one tile that way (`dune action focus_left/right`);
+# the next step waits for the head to come back `STEP_BACK` towards the middle. How far
+# is from the clicks (`step_turns`): past the 1% most turned of them by `STEP_MARGIN`,
+# else `STEP_TURN` from the calibration's head. Looking left turns `head_x` up.
+STEP_TURN = 0.35
+STEP_MARGIN = 0.08
+STEP_BACK = 0.15
+STEP_CLICKS = 200  # clicks it takes to know how far the head turns looking at the screen
 # px per unit of head turn for where the face points on the screen, from the T4 run
 # (head_x +0.26 / -0.27 on the left / right corners, 2150 px apart): what the eyes model
 # misses when you turn the head to the monitor below, eyes back in the middle.
@@ -78,6 +80,7 @@ class Pointer:
         head_screen: float = HEAD_SCREEN,
         hand_time: float = HAND_TIME,
         glide: float = 0.0,
+        step_at: tuple[float, float] | None = None,
     ):
         self.size = np.array(size, dtype=float)
         self.jump, self.jump_time, self.gain = jump, jump_time, head_gain
@@ -98,9 +101,11 @@ class Pointer:
         self.glide = glide
         self.shown: np.ndarray | None = None  # where the glide has it, on its way to `at`
         self.shown_t = 0.0
-        self.over = 0.0  # px the head would take the pointer past the left (<0) / right edge
-        self.push = 0  # px to push the edge with, this frame (`dune pointer by`)
-        self.pushed, self.push_t = 0.0, 0.0
+        # `head_x` past which the head steps the strip left / right (None: from `head_ref`)
+        ref = float(self.head_ref[0])
+        self.step_at = step_at or (ref + STEP_TURN, ref - STEP_TURN)
+        self.step = 0  # a tile to step this frame: -1 left, 1 right, 0 none
+        self.turned = 0  # stepped that way: the head has to come back first
 
     def hand(self, t: float, xy):
         """The mouse moved the pointer to `xy` on this monitor (None: on another one)."""
@@ -113,7 +118,7 @@ class Pointer:
         """The pixel to move the pointer to, or None when it stays where it is (or is let
         go). `gaze` is not kept on the screen: off it is how looking away shows."""
         gaze, head = np.asarray(gaze, dtype=float), np.asarray(head, dtype=float)
-        self.push = 0
+        self.step = 0
         if self.elsewhere:  # on another monitor: only the mouse brings it back here
             self.at = self.sent = self.far_since = self.away_since = None
             self.hand_until = None
@@ -129,6 +134,8 @@ class Pointer:
                 self.far_since = None
                 return None
             self.hand_until, self.hand_gaze = None, gaze.copy()  # stopped: kept until you look away
+        if not self.released and self.head_step(head):
+            return None  # turned to step: the pointer stays (the eyes model reads the turn too)
         # where you look, the head counted too (the eyes model has it still, where it
         # was at calibration): only for telling whether that is on the screen
         seen = gaze - self.head_screen * (head - self.head_ref)
@@ -162,7 +169,6 @@ class Pointer:
         else:
             self.far_since = None
             self.follow(head)
-        self.edge_push(t, gaze)
         if self.glide > 0 and self.shown is not None:
             k = 1.0 - np.exp(-max(t - self.shown_t, 0.0) / self.glide)
             self.shown = self.shown + (self.at - self.shown) * k
@@ -177,25 +183,28 @@ class Pointer:
 
     def land(self, gaze, head):
         self.landed = np.clip(gaze, 0, self.size - 1)
-        self.at, self.head0, self.far_since, self.over = self.landed.copy(), head, None, 0.0
+        self.at, self.head0, self.far_since = self.landed.copy(), head, None
 
     def follow(self, head):
-        wanted = self.landed - self.gain * (head - self.head0)
-        self.at = np.clip(wanted, 0, self.size - 1)
-        self.over = float(wanted[0] - self.at[0])
+        self.at = np.clip(self.landed - self.gain * (head - self.head0), 0, self.size - 1)
 
-    def edge_push(self, t: float, gaze):
-        """`push` from the head turned on past a side edge the gaze is at."""
-        dt, self.push_t = max(t - self.push_t, 0.0), t
-        w = self.size[0]
-        at_edge = gaze[0] < EDGE_GAZE if self.over < 0 else gaze[0] > w - 1 - EDGE_GAZE
-        past = abs(self.over) - PUSH_DEAD
-        if past <= 0 or not at_edge or dt > 0.2:  # not pushing (or frames missed): starts over
-            self.pushed = 0.0
-            return
-        self.pushed += past * PUSH_RATE * dt * np.sign(self.over)
-        self.push = int(self.pushed)
-        self.pushed -= self.push
+    def head_step(self, head) -> bool:
+        """Whether the head is turned to step the strip (`step` set on the frame it gets
+        there). Back from a step, the pointer lands where you look then."""
+        left, right = self.step_at
+        x = float(head[0])
+        if self.turned:
+            back = x < left - STEP_BACK if self.turned < 0 else x > right + STEP_BACK
+            if not back:
+                return True
+            self.turned = 0
+            self.at = None  # lands on the gaze, with the head as it is now
+            return False
+        if x >= left or x <= right:
+            self.step = self.turned = -1 if x >= left else 1
+            self.far_since = None
+            return True
+        return False
 
 
 class Filter2:
@@ -251,9 +260,18 @@ def move(x: int, y: int, output: str | None):
     send(f"pointer\tmove\t{x}\t{y}\t{output or ''}")
 
 
-def push(dx: int):
-    """`dune pointer by dx 0`: against a side edge, dune slides the strip."""
-    send(f"pointer\tby\t{dx}\t0")
+def action(name: str):
+    """`dune action NAME`: what that key of `[keys]` does (`focus_left`...)."""
+    send(f"action\t{name}")
+
+
+def step_turns(data: dict) -> tuple[float, float] | None:
+    """`head_x` past which the head steps the strip left / right: further than the 1%
+    most turned of the clicks (looking at the screen), by `STEP_MARGIN`. None: too few."""
+    xs = [s["feats"]["head_x"] for s in data.get("click_samples") or [] if s.get("feats")]
+    if len(xs) < STEP_CLICKS:
+        return None
+    return float(np.percentile(xs, 99)) + STEP_MARGIN, float(np.percentile(xs, 1)) - STEP_MARGIN
 
 
 def send(request: str):
@@ -290,6 +308,7 @@ def run(args) -> int:
         head_ref=(ref.get("head_x", 0.0), ref.get("head_y", 0.0)),
         head_screen=0.0 if fix else HEAD_SCREEN,
         glide=args.glide,
+        step_at=step_turns(data),
     )
     gaze_f, head_f = Filter2(GAZE_FILTER), Filter2(HEAD_FILTER)
     learner = ClickLearner(data, eyes, fix, path)
@@ -304,6 +323,8 @@ def run(args) -> int:
     else:
         with_head = ""
     print(f"driving the pointer on {output} ({size[0]}x{size[1]}); calibrated {data['time']}{with_head}", flush=True)
+    left, right = pointer.step_at
+    print(f"a tile left with head_x past {left:+.2f}, right past {right:+.2f}", flush=True)
     try:
         while not stop:
             if camera.error:
@@ -341,18 +362,21 @@ def run(args) -> int:
             px = pointer.update(sample.t, gaze, head)
             if pointer.released != was_released:
                 print("looking off the screen: pointer let go" if pointer.released else "back on the screen", flush=True)
-            if px is not None or pointer.push:
+            if pointer.step and args.verbose:
+                side = "left" if pointer.step < 0 else "right"
+                print(f"head turned {side} (head_x {head[0]:+.2f}): one tile {side}", flush=True)
+            if px is not None or pointer.step:
                 try:
                     if px is not None:
                         move(*px, output)
-                    if pointer.push:
-                        push(pointer.push)
+                    if pointer.step:
+                        action("focus_left" if pointer.step < 0 else "focus_right")
                 except OSError as e:  # dune went away (restarted, quit)
                     print(f"cannot reach dune: {e}", file=sys.stderr)
                     return 1
                 moves += 1
             if args.verbose and sample.t - since >= 1.0:
-                print(f"{camera.fps:4.1f} fps  {moves} moves  pointer {pointer.sent}", flush=True)
+                print(f"{camera.fps:4.1f} fps  {moves} moves  pointer {pointer.sent}  head_x {head[0]:+.2f}", flush=True)
                 moves, since = 0, sample.t
     finally:
         clicks.stop()

@@ -167,33 +167,56 @@ def test_the_pointer_glides_instead_of_jumping():
     assert p.sent[0] >= 1998
 
 
-def test_looking_at_a_side_edge_and_turning_on_pushes_it():
-    p = track.Pointer(SIZE, head_gain=2000, head_screen=0.0)
-    p.update(0.0, (100, 500), (0.0, 0.0))
-    # the head turns left (head_x up): the pointer to the edge, then 100 px past it
-    total = 0
-    for i in range(1, 35):  # ~1 s
-        p.update(0.03 * i, (100, 500), (0.1, 0.0))
-        assert p.push <= 0
-        total += p.push
-    assert p.sent[0] == 0
-    assert -400 < total < -250  # (100 - 20) px past × 4 a second, leftwards
-    # the head back: no more pushing
-    p.update(1.1, (100, 500), (0.0, 0.0))
-    assert p.push == 0
+def test_a_head_turned_past_the_screen_steps_one_tile_until_it_comes_back():
+    p = track.Pointer(SIZE, head_gain=2000, head_screen=0.0, step_at=(0.4, -0.3))
+    p.update(0.0, (1280, 500), (0.0, 0.0))
+    steps = []
+    # the head turns left (head_x up) past 0.4 and stays there, the eyes in the middle
+    for i in range(1, 35):
+        p.update(0.03 * i, (1280, 500), (min(0.05 * i, 0.5), 0.0))
+        steps.append(p.step)
+    assert steps.count(-1) == 1 and steps.count(1) == 0  # one tile left, held: no more
+    sent = p.sent
+    # a little back is not back: still no step, the pointer stays
+    p.update(1.1, (1280, 500), (0.3, 0.0))
+    assert p.step == 0 and p.sent == sent
+    # back towards the middle, then turned again: the next tile
+    p.update(1.2, (900, 500), (0.1, 0.0))
+    assert p.step == 0 and p.sent is not None and abs(p.sent[0] - 900) < 2
+    p.update(1.3, (900, 500), (0.45, 0.0))
+    assert p.step == -1
+    # the right side steps right
+    p.update(1.4, (900, 500), (0.0, 0.0))
+    p.update(1.5, (900, 500), (-0.35, 0.0))
+    assert p.step == 1
 
 
-def test_a_head_turn_away_from_the_edge_gaze_does_not_push():
-    p = track.Pointer(SIZE, head_gain=2000, head_screen=0.0)
-    p.update(0.0, (600, 500), (0.0, 0.0))  # looking 600 px from the left edge
-    for i in range(1, 35):
-        p.update(0.03 * i, (600, 500), (0.4, 0.0))  # a big turn takes the pointer past it
-        assert p.push == 0
-    # and the right edge pushes the other way
-    p = track.Pointer(SIZE, head_gain=2000, head_screen=0.0)
-    p.update(0.0, (2500, 500), (0.0, 0.0))
-    total = 0
-    for i in range(1, 35):
-        p.update(0.03 * i, (2500, 500), (-0.1, 0.0))
-        total += p.push
-    assert total > 150
+def test_looking_at_the_screen_with_the_head_turned_does_not_step():
+    p = track.Pointer(SIZE, head_gain=2000, head_screen=0.0, step_at=(0.4, -0.3))
+    for i, x in enumerate((0.0, 0.2, 0.35, -0.25, 0.0)):
+        p.update(0.03 * i, (100, 500), (x, 0.0))
+        assert p.step == 0
+
+
+def test_step_turns_come_from_the_clicks():
+    clicks = [{"feats": {"head_x": x}} for x in np.linspace(-0.25, 0.3, 300)]
+    left, right = track.step_turns({"click_samples": clicks})
+    assert 0.37 < left < 0.39 and -0.34 < right < -0.32
+    assert track.step_turns({"click_samples": clicks[:50]}) is None
+    p = track.Pointer(SIZE, head_ref=(0.02, 0.0))  # without: the calibration's head ± STEP_TURN
+    assert p.step_at == (0.02 + track.STEP_TURN, 0.02 - track.STEP_TURN)
+
+
+def test_action_speaks_dunes_protocol(tmp_path, monkeypatch):
+    import socket
+
+    path = str(tmp_path / "dune.sock")
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(path)
+    server.listen(1)
+    monkeypatch.setenv("DUNE_SOCKET", path)
+    track.action("focus_left")
+    conn, _ = server.accept()
+    assert conn.recv(100) == b"action\tfocus_left"
+    conn.close()
+    server.close()
