@@ -48,8 +48,9 @@ same in the foreground.
 
 **Landing on buttons.** With [dune-a11y](../dune-a11y) installed, a jump lands on the
 middle of the button, link, tab or menu item nearest where you look (within 90 px,
-`--snap PX`; 0: off), from the apps' accessibility trees (`dune-a11y watch OUTPUT`, the
-visible tiles of the calibrated monitor, read every second and when a tile moves). In a
+`--snap PX`; 0: off), from the apps' accessibility trees: at each jump `dune-a11y serve
+OUTPUT` is asked what is near (it reads only that part of that window, in a few ms, and
+nothing between jumps); the pointer lands on the gaze and glides over when it answers. In a
 field or a list (wider or taller than 160 px) it stays where you look, inside it. The
 head still moves it from there. Apps show their tree only with accessibility on
 (`dune-a11y enable`, which `dune-session` runs); floating windows have none. A click by
@@ -111,7 +112,7 @@ gives 478 points of the face, irises included, and its pose; `features.py` turns
 into numbers, `model.py` fits a ridge polynomial from them to the screen (the `eyes`
 set drives the pointer), `track.py` turns gaze and head into pointer moves, sent
 straight on dune's socket (`pointer\tmove\tX\tY\tOUTPUT`, what `dune pointer move` sends);
-`snap.py` follows `dune-a11y watch` and tells a jump which button to land on.
+`snap.py` asks `dune-a11y serve` which button a jump should land on.
 
 ## Tests
 

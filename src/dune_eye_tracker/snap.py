@@ -1,11 +1,11 @@
-"""Landing on what can be clicked: where the buttons, links and tabs of the monitor are,
-from `dune-a11y watch OUTPUT` (the apps' accessibility trees, see ../dune-a11y), and the
-one a gaze is nearest. A jump lands on its middle instead of the gaze's pixel: the webcam
-is ~120 px off, a button is ~30 px tall."""
+"""Landing on what can be clicked: at each jump, `dune-a11y serve OUTPUT` is asked what is
+near where you look (the apps' accessibility trees, see ../dune-a11y; only the branches
+near it are read, nothing between jumps) and the pointer glides onto it when it answers:
+the middle of a button, in a field or a list where you look inside it. The webcam is ~120
+px off, a button ~30 px tall. And `Puts`: another program putting the pointer somewhere."""
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import socket
@@ -15,71 +15,68 @@ import time
 from pathlib import Path
 from queue import Empty, Queue
 
-SNAP = 90.0  # px: a target this near the gaze takes the jump
-BIG = 160  # px: a target this wide or tall (a field, a list) keeps the gaze inside it
+SNAP = 90.0  # px: a thing this near the gaze takes the jump
 
 
-def nearest(targets: list[tuple[int, int, int, int]], x: float, y: float, radius: float):
-    """Where a jump to the gaze (x, y) lands: the middle of the nearest target (x, y, w, h)
-    within `radius` (the smaller when the gaze is in more than one); in a big one the gaze
-    kept inside it. None: none that near."""
-    best = None
-    for tx, ty, tw, th in targets:
-        dx = max(tx - x, 0.0, x - (tx + tw - 1))
-        dy = max(ty - y, 0.0, y - (ty + th - 1))
-        d = (dx * dx + dy * dy) ** 0.5
-        if d <= radius and (best is None or (d, tw * th) < best[:2]):
-            best = (d, tw * th, (tx, ty, tw, th))
-    if best is None:
-        return None
-    tx, ty, tw, th = best[2]
-    if tw > BIG or th > BIG:
-        inset = 4
-        return (min(max(x, tx + inset), tx + tw - 1 - inset), min(max(y, ty + inset), ty + th - 1 - inset))
-    return (tx + (tw - 1) / 2, ty + (th - 1) / 2)
-
-
-def parse(line: str) -> list[tuple[int, int, int, int]] | None:
-    """A `dune-a11y watch` line's targets; None when it is not one."""
+def parse_answer(line: str) -> tuple[int, tuple[float, float] | None] | None:
+    """`SEQ X Y` (land there) or `SEQ -` (nothing near: stay on the gaze)."""
+    parts = line.split()
     try:
-        found = json.loads(line)["targets"]
-        return [(int(t["x"]), int(t["y"]), int(t["w"]), int(t["h"])) for t in found]
-    except (ValueError, KeyError, TypeError):
-        return None
+        if len(parts) == 2 and parts[1] == "-":
+            return int(parts[0]), None
+        if len(parts) == 3:
+            return int(parts[0]), (float(parts[1]), float(parts[2]))
+    except ValueError:
+        pass
+    return None
 
 
-class Targets(threading.Thread):
-    """`dune-a11y watch OUTPUT` in the background: the latest targets of the monitor.
-    Without dune-a11y (or when it stops) there are none, and the gaze lands as it is."""
+class Near(threading.Thread):
+    """`dune-a11y serve OUTPUT` in the background: `ask` where a jump landed, `answers`
+    where it should have (the jump's number with it, so a late answer for an older jump is
+    told apart). Without dune-a11y (or when it stops) nothing answers: the gaze lands as it
+    is."""
 
     def __init__(self, output: str, radius: float = SNAP):
         super().__init__(daemon=True)
         self.output, self.radius = output, radius
-        self.targets: list[tuple[int, int, int, int]] = []
+        self.queue: Queue = Queue()
         self.proc: subprocess.Popen | None = None
         self.error: str | None = None
-
-    def run(self):
         exe = shutil.which("dune-a11y")
         if exe is None:
             self.error = "dune-a11y is not installed: the pointer lands where you look"
             return
         try:
             self.proc = subprocess.Popen(
-                [exe, "watch", self.output], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+                [exe, "serve", output], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True, bufsize=1,
             )
         except OSError as e:
             self.error = f"dune-a11y: {e}"
+
+    def run(self):
+        if self.proc is None:
             return
         for line in self.proc.stdout:
-            found = parse(line)
-            if found is not None:
-                self.targets = found  # one assignment: the reader sees the old or the new
-        self.targets = []
+            if (answer := parse_answer(line)) is not None:
+                self.queue.put(answer)
 
-    def __call__(self, gaze):
-        """`Pointer`'s snap: where a jump to `gaze` lands, None to land on it."""
-        return nearest(self.targets, float(gaze[0]), float(gaze[1]), self.radius)
+    def ask(self, seq: int, x: float, y: float):
+        if self.proc is None or self.proc.poll() is not None:
+            return
+        try:
+            self.proc.stdin.write(f"near {seq} {x:.0f} {y:.0f} {self.radius:.0f}\n")
+            self.proc.stdin.flush()
+        except OSError:  # gone: no more answers
+            self.proc = None
+
+    def answers(self):
+        while True:
+            try:
+                yield self.queue.get_nowait()
+            except Empty:
+                return
 
     def stop(self):
         if self.proc is not None and self.proc.poll() is None:

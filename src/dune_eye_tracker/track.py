@@ -32,7 +32,7 @@ from . import model
 from .clicks import ClickLearner, Clicks
 from .features import BLINK, Camera
 from .measure import calibration_path, state_dir
-from .snap import Puts, Targets
+from .snap import Near, Puts
 
 JUMP = 300.0  # px between gaze and pointer that make it jump
 JUMP_TIME = 0.15  # s the gaze stays that far first (not one wild frame)
@@ -82,7 +82,6 @@ class Pointer:
         hand_time: float = HAND_TIME,
         glide: float = 0.0,
         step_at: tuple[float, float] | None = None,
-        snap=None,
     ):
         self.size = np.array(size, dtype=float)
         self.jump, self.jump_time, self.gain = jump, jump_time, head_gain
@@ -108,9 +107,9 @@ class Pointer:
         self.step_at = step_at or (ref + STEP_TURN, ref - STEP_TURN)
         self.step = 0  # a tile to step this frame: -1 left, 1 right, 0 none
         self.turned = 0  # stepped that way: the head has to come back first
-        # where a jump to a gaze lands instead (the nearest button: `snap.Targets`), None
-        # to land on the gaze
-        self.snap = snap
+        # jumps so far: a late answer of where one should have landed (`snap_to`) is only
+        # taken for the last one
+        self.landings = 0
 
     def hand(self, t: float, xy):
         """The mouse moved the pointer to `xy` on this monitor (None: on another one)."""
@@ -188,9 +187,21 @@ class Pointer:
 
     def land(self, gaze, head):
         self.landed = np.clip(gaze, 0, self.size - 1)
-        if self.snap is not None and (onto := self.snap(self.landed)) is not None:
-            self.landed = np.clip(np.asarray(onto, dtype=float), 0, self.size - 1)
+        self.landings += 1
         self.at, self.head0, self.far_since = self.landed.copy(), head, None
+
+    def snap_to(self, seq: int, onto) -> bool:
+        """Jump `seq` should have landed on `onto` (the button there, `snap.Near`): the
+        pointer glides over, the head still moving it from there. Not when another jump
+        came since, or the hand has it."""
+        if seq != self.landings or self.landed is None or self.at is None:
+            return False
+        if self.released or self.elsewhere or self.hand_until is not None or self.hand_gaze is not None:
+            return False
+        moved = np.clip(np.asarray(onto, dtype=float), 0, self.size - 1) - self.landed
+        self.landed = self.landed + moved
+        self.at = np.clip(self.at + moved, 0, self.size - 1)
+        return True
 
     def follow(self, head):
         self.at = np.clip(self.landed - self.gain * (head - self.head0), 0, self.size - 1)
@@ -308,10 +319,10 @@ def run(args) -> int:
     camera.start()
     ref = data.get("head") or {}
     fix = head_fix(data)
-    targets = None
-    if args.snap > 0 and output:
-        targets = Targets(output, args.snap)
-        targets.start()
+    near = Near(output, args.snap) if args.snap > 0 and output else None
+    if near is not None:
+        near.start()
+    asked = 0  # the last jump `near` was asked about
     # with the head calibration the gaze already counts the head: "off the screen" too
     pointer = Pointer(
         size,
@@ -320,7 +331,6 @@ def run(args) -> int:
         head_screen=0.0 if fix else HEAD_SCREEN,
         glide=args.glide,
         step_at=step_turns(data),
-        snap=targets,
     )
     gaze_f, head_f = Filter2(GAZE_FILTER), Filter2(HEAD_FILTER)
     learner = ClickLearner(data, eyes, fix, path)
@@ -338,9 +348,8 @@ def run(args) -> int:
     else:
         with_head = ""
     print(f"driving the pointer on {output} ({size[0]}x{size[1]}); calibrated {data['time']}{with_head}", flush=True)
-    if targets is not None:
-        targets.join(timeout=0.5)  # not found: it says so at once
-        print(targets.error or f"landing on buttons within {args.snap:g} px (dune-a11y)", flush=True)
+    if near is not None:
+        print(near.error or f"landing on buttons within {args.snap:g} px (dune-a11y, asked at each jump)", flush=True)
     left, right = pointer.step_at
     print(f"a tile left with head_x past {left:+.2f}, right past {right:+.2f}", flush=True)
     try:
@@ -388,7 +397,14 @@ def run(args) -> int:
             gaze = gaze_f(guess[0], sample.t)
             head = head_f((feats["head_x"], feats["head_y"]), sample.t)
             was_released = pointer.released
+            if near is not None:
+                for seq, onto in near.answers():  # where a jump should have landed
+                    if onto is not None and pointer.snap_to(seq, onto) and args.verbose:
+                        print(f"jump {seq} onto {onto[0]:.0f} {onto[1]:.0f}", flush=True)
             px = pointer.update(sample.t, gaze, head)
+            if near is not None and pointer.landings != asked and pointer.landed is not None:
+                asked = pointer.landings  # a new jump: what is there? (answered in a few ms)
+                near.ask(asked, *pointer.landed)
             if pointer.released != was_released:
                 print("looking off the screen: pointer let go" if pointer.released else "back on the screen", flush=True)
             if pointer.step and args.verbose:
@@ -411,8 +427,8 @@ def run(args) -> int:
         clicks.stop()
         if puts is not None:
             puts.stop()
-        if targets is not None:
-            targets.stop()
+        if near is not None:
+            near.stop()
         if learner.kept:
             learner.save()
         camera.stop()
