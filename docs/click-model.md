@@ -21,7 +21,25 @@ every click, which window it was on and where in it; that is what the model lear
 
 ## The data
 
-Each click kept by `ClickLearner` goes in `~/.local/state/dune-eye-tracker/calibration.json`,
+**The model's data is `~/.local/state/dune-eye-tracker/clicks.jsonl`**: one line per click
+on the calibrated monitor (`ClickLearner.log`), never cut and kept across calibrations, so
+it grows for as long as more clicks still help (the learning curve is what says when to
+stop caring, not a cap; ~400 bytes a click, 100 000 clicks ~40 MB).
+
+| Field | What |
+|---|---|
+| `time` | when (local), for recency and for splitting in order |
+| `calibration` | the calibration in use (its `time`): guesses of different calibrations differ |
+| `output`, `size` | the monitor and its size |
+| `seen` | where the click was seen, px (the magnified point while zoomed) |
+| `guess` | the gaze guess then (the median of the frames before it, with the click fix) |
+| `spread` | how much the guess moved in those frames, px: above `STEADY` (100) the click fix does not learn from it; the model may |
+| `feats` | the eyes' and head's numbers (median of the frames): a guess can be made again with another calibration |
+| `ctx` | the tile, as below |
+
+The click fix has its own, bounded data (it is fitted on every frame, and only means
+something for one calibration): each click it keeps goes in
+`~/.local/state/dune-eye-tracker/calibration.json`,
 `click_samples`: one row per camera frame of the 0.35–0.05 s before the click (the eyes
 there, the hand not yet), at most `KEEP` (1000) clicks, the last ones.
 
@@ -58,8 +76,11 @@ checked on, as `run` would.
 
 ## Stages
 
-1. **Collect** (now). dune 2026-11-02 (needs a new session) gives `ctx`. Use the tracker
-   as usual; nothing changes in how it behaves. A few days: ~500 clicks with `ctx`.
+1. **Collect** (now). dune 2026-11-02 (needs a new session) gives `ctx`; every click goes in
+   `clicks.jsonl`. Use the tracker as usual; nothing changes in how it behaves. Start
+   checking at ~500 clicks with `ctx`; keep collecting while the learning curve (the
+   model's miss on later clicks against how many it was fitted on) still goes down, per
+   app: a much-used app settles long before a rare one.
 2. **A density per app, in window coordinates.** For each `app_id`: where in the window
    clicks fall, normalised (`tile_x / tile_w`, `tile_y / tile_h`) and also in pixels from
    each corner (a toolbar keeps its place from the top-left, a send button from the
@@ -77,6 +98,28 @@ checked on, as `run` would.
 5. **Use it.** At a jump: gaze → (if the model is confident) its spot; then `dune-a11y
    serve` lands on the button there; the zoom (Mod+z) stays for what neither got right.
    Every click keeps teaching both.
+
+## Tools (decided 2026-11-02)
+
+No LLM and no deep network: the data is small and tabular (a few numbers per click, a few
+thousand clicks), where a big model only learns the clicks by heart.
+
+- **Stages 2–3: numpy only** (already a dependency): the per-app density and the Bayes
+  step are counting, smoothing and a product, a few lines whose every decision can be
+  read.
+- **Stage 4: scikit-learn.** `LogisticRegression` (or `SGDClassifier.partial_fit`, to
+  update click by click) ranking the candidates of a landing (the buttons near the gaze
+  from `dune-a11y serve`, the app's frequent spots) on their distance to the gaze, how
+  often and how lately they were clicked, their size and role; `HistGradientBoosting
+  Classifier` only if the logistic falls short; `TimeSeriesSplit` for the checks in order;
+  `KernelDensity` to compare with the hand-made density.
+- **Analysis first**: `uv add --group analysis scikit-learn` when stage 4 starts, not a
+  dependency of `run` until a model has passed its checks and is used live.
+- **A model is saved as JSON, not pickle**: a logistic regression is a few dozen numbers,
+  safe to load and readable, and run with numpy in the pointer's loop without importing
+  scikit-learn. Trees would need scikit-learn at run time: one more reason to try them
+  only when needed.
+- Not LightGBM or XGBoost: nothing to gain at a few thousand clicks, native libraries more.
 
 ## Guards
 

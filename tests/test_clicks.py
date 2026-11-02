@@ -83,7 +83,9 @@ def test_a_fit_in_the_background_lands_later_and_the_clicks_go_on(tmp_path):
         if note := learner.refit_background():
             notes.append(note)
         t += 1.0
-    assert learner.job is not None  # due at 10 clicks: started, not waited for
+        if learner.job is not None:
+            break  # due at 10 clicks: started, not waited for
+    assert i == 9 and learner.job is not None and notes == []
     learner.job.join(timeout=10)
     note = learner.refit_background()  # done: put in use
     assert note.startswith("10 clicks: on the last 5")  # the clicks as they were when it started
@@ -128,3 +130,23 @@ def test_zoom_lines():
            "area_x": 6, "area_y": 6, "area_w": 938, "area_h": 1054}
     assert clicks.zoom_of(zin) == {"x": 800, "y": 400, "scale": 3, "area_x": 6, "area_y": 6, "area_w": 938, "area_h": 1054}
     assert clicks.zoom_of({"event": "zoom", "change": "out", "output": "M"}) is None
+
+
+def test_every_click_goes_in_the_log_for_good(tmp_path):
+    rng = np.random.default_rng(8)
+    data, eyes = calibration(rng)
+    data["time"] = "2026-11-02T09:49:44"
+    learner = clicks.ClickLearner(data, eyes, None, tmp_path / "calibration.json")
+    ctx = {"tile": 3, "app_id": "vivaldi-stable", "tile_x": 200, "tile_y": 96, "tile_w": 1268, "tile_h": 1064}
+    t = look(learner, 0.0, 812, 440, rng)
+    assert learner.click(t, 812, 440, "HDMI-A-1", ctx).startswith("kept")
+    # a gaze moving before the click: not learnt from by the fix, still logged (marked)
+    for i in range(15):
+        learner.seen(1.0 + i / 30, fake_feats(0.1 + i * 0.05, 0.5, rng, 0.001))
+    assert learner.click(1.5, 900, 500, "HDMI-A-1").startswith("gaze moving")
+    lines = [json.loads(l) for l in (tmp_path / "clicks.jsonl").read_text().splitlines()]
+    assert len(lines) == 2
+    first, second = lines
+    assert first["seen"] == [812, 440] and first["ctx"] == ctx and first["calibration"] == "2026-11-02T09:49:44"
+    assert set(first["feats"]) >= {"eye_u", "eye_v", "head_x", "open"} and first["spread"] < clicks.STEADY
+    assert second["spread"] > clicks.STEADY and "ctx" not in second

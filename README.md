@@ -122,7 +122,9 @@ set drives the pointer), `track.py` turns gaze and head into pointer moves, sent
 straight on dune's socket (`pointer\tmove\tX\tY\tOUTPUT`, what `dune pointer move` sends);
 `snap.py` asks `dune-a11y serve` which button a jump should land on.
 [docs/click-model.md](docs/click-model.md): how a model of where clicks go is trained on
-the clicks of use (the data kept, how it is checked, the stages, what was found).
+the clicks of use (the data kept, how it is checked, the stages, what was found). Its data:
+every click, a line in `~/.local/state/dune-eye-tracker/clicks.jsonl`, never cut and kept
+across calibrations.
 
 ## Tests
 

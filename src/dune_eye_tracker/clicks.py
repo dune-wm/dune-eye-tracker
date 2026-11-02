@@ -39,6 +39,8 @@ MARGIN = 1.15
 # clicks kept at most (the last): fitted on the last N before 100 it had not seen, the miss
 # was 260 / 220 / 194 px with 100 / 200 / 300, still going down at 400
 KEEP = 1000
+# every click, one line, never cut: the click model's data (`ClickLearner.log`)
+LOG = "clicks.jsonl"
 MIN_SAMPLES = 3
 
 
@@ -74,6 +76,7 @@ class ClickLearner:
         g = self.guess(rows)
         mid = np.median(g, axis=0)
         spread = float(np.sqrt((np.linalg.norm(g - mid, axis=1) ** 2).mean()))
+        self.log(x, y, rows, mid, spread, ctx)
         if spread > STEADY:
             self.skipped += 1
             return f"gaze moving ({spread:.0f} px)"
@@ -89,6 +92,29 @@ class ClickLearner:
             old = set(ids[: len(ids) - KEEP])
             self.samples = [s for s in self.samples if s["point"] not in old]
         return f"kept ({far:.0f} px off)"
+
+    def log(self, x: int, y: int, rows: list[dict], guess, spread: float, ctx: dict | None):
+        """One line per click in `clicks.jsonl` beside calibration.json, never cut and kept
+        across calibrations: the data of a model of where clicks go (docs/click-model.md),
+        for as long as more of it still helps. The eyes' numbers (the median of the frames
+        before it) are kept, not only the guess, so a guess can be made again with another
+        calibration; a moving gaze too, marked (`spread`)."""
+        feats = {k: float(np.median([r[k] for r in rows])) for k in rows[0]}
+        line = {
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "calibration": self.data.get("time"),
+            "output": self.output,
+            "size": list(self.size),
+            "seen": [x, y],
+            "guess": [round(float(guess[0]), 1), round(float(guess[1]), 1)],
+            "spread": round(spread, 1),
+            "feats": feats,
+        } | ({"ctx": ctx} if ctx else {})
+        try:
+            with open(self.path.with_name(LOG), "a") as f:
+                f.write(json.dumps(line) + "\n")
+        except OSError:  # a full disk must not stop the pointer
+            pass
 
     def arrays(self, samples: list[dict]):
         w, h = self.size
