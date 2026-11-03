@@ -40,6 +40,9 @@ stop caring, not a cap; ~400 bytes a click, 100 000 clicks ~40 MB).
 | `hand` | whether the mouse moved the pointer just before it (0.5 s): a key click after the mouse put it right is as good as the mouse's |
 | `said` | what came of it: `kept (N px off)` or why not |
 | `ctx` | the tile, as below |
+| `jump` | how the pointer got there (2026-11-03 on): `kind` (`gaze` a jump, `back` on the gaze after a head step, `hand` the mouse, `put` dune-a11y), `landed` (px, after a snap), `gaze` (the gaze then, not kept on the screen: past an edge shows), `snap` (how far dune-a11y moved it), `age` (s since), `head` (px the head moved it since), `at` (where it was at the click). After `hand` or `put`, `before`: the gaze's jump the hand took the pointer from, the same fields (`at`: where the hand found it); what the hand then moved is that jump's miss |
+| `focus` | the focused tile then, from `dune events window,strip`: `tile`, the one before (`prev`), `age` (s since focus changed), its rectangle on the monitor (`x`, `y`, `w`, `h`); with `focus_follows_mouse` it is mostly the tile under the pointer |
+| `around` | what could be clicked within `snap.AROUND` (250 px) of where the gaze's jump landed (dune-a11y, at the jump): the jump of `kind` gaze or back, else the one in `before`: `x`, `y`, `w`, `h`, `role`, `focused` when it had the keyboard focus. No names |
 
 The click fix weighs its clicks by `by` (`clicks.WEIGHTS`): mouse 1, key and command 0.5,
 name 0.25 (older clicks without it: 1). A key or voice click lands where the gaze already

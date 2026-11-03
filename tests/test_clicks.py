@@ -184,3 +184,31 @@ def test_a_weighted_fit_leans_to_the_heavier_samples():
     w = np.concatenate([np.full(10, 1.0), np.full(10, 0.25)])
     assert abs(model.ridge(a, y, 0.0)[0, 0] - 5.0) < 1e-9
     assert abs(model.ridge(a, y, 0.0, w)[0, 0] - 2.0) < 1e-9
+
+
+def test_the_focused_tile_is_followed_from_dunes_events():
+    f = clicks.Focus()
+    assert f.at("M", 0.0) is None
+    f.apply({"event": "strip", "change": "layout", "output": "M", "view": 1282, "width": 2560, "height": 1080,
+             "tiles": [{"tile": 3, "x": 8, "y": 8, "w": 1268, "h": 1064}, {"tile": 5, "x": 1290, "y": 8, "w": 1268, "h": 1064}]}, 0.0)
+    f.apply({"event": "window", "change": "focus", "tile": 3, "app_id": "foot", "title": "~"}, 1.0)
+    f.apply({"event": "window", "change": "focus", "tile": 5, "app_id": "foot", "title": "~"}, 2.0)
+    assert f.at("M", 2.5) == {"tile": 5, "prev": 3, "age": 0.5, "x": 8, "y": 8, "w": 1268, "h": 1064}
+    assert f.at("other", 2.5) == {"tile": 5, "prev": 3, "age": 0.5}  # not on that monitor's strip
+    f.apply({"event": "window", "change": "focus", "tile": 5}, 3.0)  # the same again: not a change
+    assert f.at("M", 3.0)["age"] == 1.0
+    f.apply({"event": "window", "change": "close", "tile": 5}, 4.0)
+    assert f.at("M", 4.0) is None
+
+
+def test_what_the_tracker_knew_goes_in_the_log_only(tmp_path):
+    rng = np.random.default_rng(8)
+    data, eyes = calibration(rng)
+    learner = clicks.ClickLearner(data, eyes, None, tmp_path / "calibration.json")
+    t = look(learner, 0.0, 812, 440, rng)
+    jump = {"kind": "gaze", "landed": [800.0, 430.0], "age": 0.4, "head": [12.0, 10.0], "at": [812.0, 440.0]}
+    focus = {"tile": 3, "prev": None, "age": 9.0}
+    learner.click(t, 812, 440, "HDMI-A-1", None, {"by": "mouse", "button": "left", "hand": False, "jump": jump, "focus": focus})
+    logged = json.loads((tmp_path / clicks.LOG).read_text())
+    assert logged["jump"] == jump and logged["focus"] == focus
+    assert set(learner.samples[0]) == {"point", "target", "feats", "by"}

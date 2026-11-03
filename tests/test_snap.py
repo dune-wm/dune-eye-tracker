@@ -5,8 +5,12 @@ SIZE = (2560, 1080)
 
 
 def test_answers():
-    assert parse_answer("7 1200 340\n") == (7, (1200.0, 340.0))
-    assert parse_answer("7 -") == (7, None)
+    assert parse_answer("7 1200 340\n") == (7, (1200.0, 340.0), None)
+    assert parse_answer("7 -") == (7, None, None)
+    around = [{"x": 1, "y": 2, "w": 30, "h": 20, "role": "link"}]
+    assert parse_answer('7 1200 340 {"around":[{"x":1,"y":2,"w":30,"h":20,"role":"link"}]}\n') == (7, (1200.0, 340.0), around)
+    assert parse_answer('7 - {"around":[]}') == (7, None, [])
+    assert parse_answer("7 - {broken") is None
     assert parse_answer("x 1 2") is None
     assert parse_answer("") is None
 

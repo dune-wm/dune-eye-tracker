@@ -110,9 +110,27 @@ class Pointer:
         # jumps so far: a late answer of where one should have landed (`snap_to`) is only
         # taken for the last one
         self.landings = 0
+        # how the pointer got to `landed`, for the clicks' log (`jump`): `gaze` (a jump),
+        # `back` (on the gaze, back from a head step), `hand` (the mouse), `put` (dune-a11y);
+        # when; the gaze then, not kept on the screen; and how far a snap moved it
+        self.land_kind: str | None = None
+        self.land_t = 0.0
+        self.land_gaze: np.ndarray | None = None
+        self.snap_shift: np.ndarray | None = None
+        self.next_kind = "gaze"
+        self.hand_kind = "hand"
+        self.now = 0.0
+        # the last jump of the gaze as it was when the hand (or a put) took the pointer
+        # from it, and its number: what the hand then put right is that jump's miss
+        self.before: dict | None = None
+        self.before_seq = 0
 
-    def hand(self, t: float, xy):
-        """The mouse moved the pointer to `xy` on this monitor (None: on another one)."""
+    def hand(self, t: float, xy, kind: str = "hand"):
+        """The mouse moved the pointer to `xy` on this monitor (None: on another one);
+        `kind` `put` when it was dune-a11y."""
+        if self.land_kind in ("gaze", "back") and self.at is not None:
+            self.before, self.before_seq = self.state(), self.landings
+        self.hand_kind = kind
         self.hand_until = t + self.hand_time
         self.hand_at = None if xy is None else np.clip(np.asarray(xy, dtype=float), 0, self.size - 1)
         self.hand_gaze = None
@@ -127,6 +145,7 @@ class Pointer:
         go). `gaze` is not kept on the screen: off it is how looking away shows."""
         gaze, head = np.asarray(gaze, dtype=float), np.asarray(head, dtype=float)
         self.step = 0
+        self.now = t
         if self.elsewhere:  # on another monitor: only the mouse brings it back here
             self.at = self.sent = self.far_since = self.away_since = None
             self.hand_until = None
@@ -137,6 +156,8 @@ class Pointer:
                     self.at = self.sent = None
                 else:
                     self.landed, self.at, self.head0 = self.hand_at.copy(), self.hand_at.copy(), head
+                    self.land_kind, self.land_t = self.hand_kind, t
+                    self.land_gaze = self.snap_shift = None
                     self.sent = (int(round(self.hand_at[0])), int(round(self.hand_at[1])))
                     self.shown, self.shown_t = self.hand_at.copy(), t
                 self.far_since = None
@@ -191,6 +212,9 @@ class Pointer:
 
     def land(self, gaze, head):
         self.landed = np.clip(gaze, 0, self.size - 1)
+        self.land_kind, self.next_kind, self.land_t = self.next_kind, "gaze", self.now
+        self.land_gaze, self.snap_shift = np.array(gaze, dtype=float), None
+        self.before = None
         self.landings += 1
         self.at, self.head0, self.far_since = self.landed.copy(), head, None
 
@@ -204,8 +228,31 @@ class Pointer:
             return False
         moved = np.clip(np.asarray(onto, dtype=float), 0, self.size - 1) - self.landed
         self.landed = self.landed + moved
+        self.snap_shift = moved if self.snap_shift is None else self.snap_shift + moved
         self.at = np.clip(self.at + moved, 0, self.size - 1)
         return True
+
+    def state(self) -> dict:
+        """How the pointer got where it is now, as `landing` says it (copies)."""
+        copy = lambda v: None if v is None else np.array(v, dtype=float)  # noqa: E731
+        return {
+            "kind": self.land_kind, "t": self.land_t, "landed": copy(self.landed),
+            "gaze": copy(self.land_gaze), "snap": copy(self.snap_shift), "at": copy(self.at),
+        }
+
+    def landing(self, t: float) -> dict | None:
+        """For a click at `t`, how the pointer got where it is: how it landed (`kind`),
+        where (`landed`, after a snap), the gaze then (`gaze`, unclipped: past an edge
+        shows), the snap's shift (`snap`), how long ago (`age`, s), what the head did to it
+        since (`head`, px) and where it is (`at`). After the hand (or a put), the jump of
+        the gaze it took the pointer from, the same way (`before`; its `at` is where the
+        hand found the pointer). None when it is not on this monitor."""
+        if self.landed is None or self.at is None or self.land_kind is None:
+            return None
+        out = said(self.state(), t)
+        if self.land_kind in ("hand", "put") and self.before is not None:
+            out["before"] = said(self.before, t)
+        return out
 
     def follow(self, head):
         self.at = np.clip(self.landed - self.gain * (head - self.head0), 0, self.size - 1)
@@ -221,12 +268,30 @@ class Pointer:
                 return True
             self.turned = 0
             self.at = None  # lands on the gaze, with the head as it is now
+            self.next_kind = "back"
             return False
         if x >= left or x <= right:
             self.step = self.turned = -1 if x >= left else 1
             self.far_since = None
             return True
         return False
+
+
+def said(state: dict, t: float) -> dict:
+    """A `Pointer.state` for the clicks' log, at a click at `t`."""
+    r1 = lambda v: [round(float(v[0]), 1), round(float(v[1]), 1)]  # noqa: E731
+    out = {
+        "kind": state["kind"],
+        "landed": r1(state["landed"]),
+        "age": round(max(t - state["t"], 0.0), 3),
+        "head": r1(state["at"] - state["landed"]),
+        "at": r1(state["at"]),
+    }
+    if state["gaze"] is not None:
+        out["gaze"] = r1(state["gaze"])
+    if state["snap"] is not None:
+        out["snap"] = r1(state["snap"])
+    return out
 
 
 def unzoom(gaze, zoom: dict | None):
@@ -341,6 +406,7 @@ def run(args) -> int:
     if near is not None:
         near.start()
     asked = 0  # the last jump `near` was asked about
+    around: tuple[int, list] | None = None  # what dune-a11y said is around that jump
     zoom = None  # dune's zoom on this monitor while it is in (a `zoom` line)
     # with the head calibration the gaze already counts the head: "off the screen" too
     pointer = Pointer(
@@ -359,6 +425,21 @@ def run(args) -> int:
     if puts is not None:
         puts.start()
     last_seq, moves, since = 0, 0, time.monotonic()
+
+    def moment(t: float) -> dict:
+        """What a geometric model of clicks needs that the click line does not say: how
+        the pointer got there (`jump`)."""
+        jump = pointer.landing(t)
+        out = {"jump": jump} if jump else {}
+        # the clickable things near where the gaze's jump landed: this one, or the one the
+        # hand took the pointer from (`before`)
+        seq = pointer.landings if jump and jump["kind"] in ("gaze", "back") else None
+        if jump and "before" in jump:
+            seq = pointer.before_seq
+        if seq is not None and around is not None and around[0] == seq:
+            out["around"] = around[1]
+        return out
+
     if data.get("click_fix"):
         c = data["click_fix"]
         with_head = f", learnt from {c['clicks']} clicks ({c['after']:.0f} px off on the last ones)"
@@ -385,10 +466,10 @@ def run(args) -> int:
                 # dune-a11y clicked something there (by voice, "click on X"): a click the
                 # least trusted (`clicks.WEIGHTS`), you looked at it somewhere; then the
                 # pointer onto it, left there as the mouse leaves it, until you look elsewhere
-                said = learner.click(t, x, y, output, None, {"by": "name", "button": "left", "hand": pointer.hand_now(t)})
+                said = learner.click(t, x, y, output, None, {"by": "name", "button": "left", "hand": pointer.hand_now(t)} | moment(t))
                 if args.verbose:
                     print(f"click on {x} {y} (dune-a11y): {said}", flush=True)
-                pointer.hand(t, (x, y))
+                pointer.hand(t, (x, y), "put")
                 try:
                     move(x, y, output)
                 except OSError as e:
@@ -409,7 +490,7 @@ def run(args) -> int:
                 if change == "move":
                     pointer.hand(t, (x, y) if out == output else None)
                     continue
-                said = learner.click(t, x, y, out, ctx, how | {"hand": pointer.hand_now(t)})
+                said = learner.click(t, x, y, out, ctx, how | {"hand": pointer.hand_now(t)} | moment(t))
                 if args.verbose:
                     print(f"click {x} {y} {out}: {said}", flush=True)
             if note := learner.refit_background():  # fits in a thread: the pointer goes on
@@ -430,7 +511,9 @@ def run(args) -> int:
             head = head_f((feats["head_x"], feats["head_y"]), sample.t)
             was_released = pointer.released
             if near is not None:
-                for seq, onto in near.answers():  # where a jump should have landed
+                for seq, onto, found in near.answers():  # where a jump should have landed
+                    if found is not None:
+                        around = (seq, found)
                     if onto is not None and pointer.snap_to(seq, onto) and args.verbose:
                         print(f"jump {seq} onto {onto[0]:.0f} {onto[1]:.0f}", flush=True)
             px = pointer.update(sample.t, unzoom(gaze, zoom), head)

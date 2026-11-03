@@ -3,7 +3,8 @@
 The mouse pointer in [dune](https://github.com/dune-wm/dune), moved by where you look, with a webcam.
 
 It all runs on this computer: the camera's images are read and dropped in memory, never
-saved nor sent; only numbers are kept (calibration, runs, clicks), in `~/.local/state`.
+saved nor sent; only numbers are kept (calibration, runs, clicks; with the clicks, the roles
+of what could be clicked near them), in `~/.local/state`.
 The face model (MediaPipe's `face_landmarker.task`) is downloaded once, by hand.
 
 ## Drive the pointer
@@ -133,7 +134,10 @@ straight on dune's socket (`pointer\tmove\tX\tY\tOUTPUT`, what `dune pointer mov
 [docs/click-model.md](docs/click-model.md): how a model of where clicks go is trained on
 the clicks of use (the data kept, how it is checked, the stages, what was found). Its data:
 every click, a line in `~/.local/state/dune-eye-tracker/clicks.jsonl`, never cut and kept
-across calibrations.
+across calibrations. With each click, for a model that goes by geometry and not by app:
+how the pointer got there (the jump, the gaze then even past an edge, what the head did
+after it), the focused tile, and what could be clicked within 250 px of the jump
+(dune-a11y: rectangles and roles, which one had the keyboard focus; no names).
 
 ## Tests
 

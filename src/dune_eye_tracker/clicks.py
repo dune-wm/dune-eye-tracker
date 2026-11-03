@@ -80,8 +80,9 @@ class ClickLearner:
     ) -> str:
         """A click at `t` (this clock): what came of it ("kept", or why not). `ctx`, from
         dune, is the tile it was on (`context`): kept with it, for learning where clicks go
-        inside each app's window. `how`: what made it (`by`, `WEIGHTS`), the `button`, and
-        whether the mouse had just moved the pointer (`hand`); `by` is kept with it."""
+        inside each app's window. `how`: what made it (`by`, `WEIGHTS`), the `button`,
+        whether the mouse had just moved the pointer (`hand`), and what the tracker knew
+        then (`jump`, `focus`, `around`: only logged); `by` is kept with it."""
         if output != self.output:
             return "other monitor"
         how = how or {}
@@ -265,9 +266,44 @@ def zoom_of(event: dict) -> dict | None:
     return {k: event[k] for k in keys} if all(k in event for k in keys) else None
 
 
+class Focus:
+    """The focused tile, from `dune events window,strip`: which (`tile`), the one before
+    it (`prev`), how long ago it changed (`age`, s) and where it is on its monitor (`x`,
+    `y`, `w`, `h`, from the strip's layout; absent when it is not on that monitor's
+    strip). Only numbers: no titles nor apps."""
+
+    def __init__(self):
+        self.tile: int | None = None
+        self.prev: int | None = None
+        self.since = 0.0
+        self.strips: dict[str, dict] = {}  # output: its last `layout` line
+
+    def apply(self, e: dict, t: float):
+        if e.get("event") == "window":
+            tile = e.get("tile")
+            if e.get("change") == "focus" and tile != self.tile:
+                self.prev, self.tile, self.since = self.tile, tile, t
+            elif e.get("change") == "close" and tile == self.tile:
+                self.prev, self.tile, self.since = self.tile, None, t
+        elif e.get("event") == "strip" and e.get("change") == "layout" and "output" in e:
+            self.strips[e["output"]] = e
+
+    def at(self, output: str, t: float) -> dict | None:
+        """The focus as a click on `output` at `t` finds it; None when nothing has it."""
+        if self.tile is None:
+            return None
+        out = {"tile": self.tile, "prev": self.prev, "age": round(max(t - self.since, 0.0), 3)}
+        strip = self.strips.get(output) or {}
+        for tile in strip.get("tiles", []):
+            if tile.get("tile") == self.tile:
+                out |= {"x": tile["x"] - strip.get("view", 0), "y": tile["y"], "w": tile["w"], "h": tile["h"]}
+        return out
+
+
 class Clicks(threading.Thread):
-    """`dune events pointer,zoom`, in the background: ("click", time heard, x, y, output,
-    the tile it was on, `how` it was made) of each left or right click on a queue, (x, y)
+    """`dune events pointer,zoom,window,strip`, in the background: ("click", time heard,
+    x, y, output, the tile it was on, `how` it was made and the `focus` then) of each left
+    or right click on a queue, (x, y)
     where it was seen; ("move", ..., None, None) as the mouse moves the pointer; ("zoom",
     t, 0, 0, output, the zoom or None, None) as dune's zoom goes in or out."""
 
@@ -275,10 +311,11 @@ class Clicks(threading.Thread):
         super().__init__(daemon=True)
         self.queue: Queue = Queue()
         self.proc: subprocess.Popen | None = None
+        self.focus = Focus()
 
     def run(self):
         try:
-            self.proc = subprocess.Popen(["dune", "events", "pointer,zoom"], stdout=subprocess.PIPE, text=True)
+            self.proc = subprocess.Popen(["dune", "events", "pointer,zoom,window,strip"], stdout=subprocess.PIPE, text=True)
         except OSError:
             return
         for line in self.proc.stdout:
@@ -290,12 +327,17 @@ class Clicks(threading.Thread):
             if e.get("event") == "zoom" and "output" in e:
                 self.queue.put(("zoom", t, 0, 0, e["output"], zoom_of(e), None))
                 continue
+            if e.get("event") in ("window", "strip"):
+                self.focus.apply(e, t)
+                continue
             if e.get("event") != "pointer":
                 continue
             if e.get("change") == "move":
                 self.queue.put(("move", t, e["x"], e["y"], e["output"], None, None))
             elif e.get("button") in ("left", "right"):
-                self.queue.put(("click", t, *seen(e)[:2], e["output"], seen(e)[2], how(e)))
+                focus = self.focus.at(e["output"], t)
+                made = how(e) | ({"focus": focus} if focus else {})
+                self.queue.put(("click", t, *seen(e)[:2], e["output"], seen(e)[2], made))
 
     def pending(self):
         while True:

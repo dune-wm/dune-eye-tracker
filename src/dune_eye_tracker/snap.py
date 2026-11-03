@@ -6,6 +6,7 @@ px off, a button ~30 px tall. And `Puts`: another program putting the pointer so
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
@@ -16,16 +17,27 @@ from pathlib import Path
 from queue import Empty, Queue
 
 SNAP = 90.0  # px: a thing this near the gaze takes the jump
+# px: what can be clicked this near a jump is asked for too, for the log of clicks only
+# (the candidates a model of where clicks go chooses among: the gaze is ~180 px off)
+AROUND = 250.0
 
 
-def parse_answer(line: str) -> tuple[int, tuple[float, float] | None] | None:
-    """`SEQ X Y` (land there) or `SEQ -` (nothing near: stay on the gaze)."""
-    parts = line.split()
+def parse_answer(line: str) -> tuple[int, tuple[float, float] | None, list | None] | None:
+    """`SEQ X Y` (land there) or `SEQ -` (nothing near: stay on the gaze), then, when
+    asked, a JSON object with what is `around` (else None)."""
+    head, brace, rest = line.partition("{")
+    tail = None
+    if brace:
+        try:
+            tail = json.loads(brace + rest).get("around")
+        except (ValueError, AttributeError):
+            return None
+    parts = head.split()
     try:
         if len(parts) == 2 and parts[1] == "-":
-            return int(parts[0]), None
+            return int(parts[0]), None, tail
         if len(parts) == 3:
-            return int(parts[0]), (float(parts[1]), float(parts[2]))
+            return int(parts[0]), (float(parts[1]), float(parts[2])), tail
     except ValueError:
         pass
     return None
@@ -37,9 +49,9 @@ class Near(threading.Thread):
     told apart). Without dune-a11y (or when it stops) nothing answers: the gaze lands as it
     is."""
 
-    def __init__(self, output: str, radius: float = SNAP):
+    def __init__(self, output: str, radius: float = SNAP, around: float = AROUND):
         super().__init__(daemon=True)
-        self.output, self.radius = output, radius
+        self.output, self.radius, self.around = output, radius, around
         self.queue: Queue = Queue()
         self.proc: subprocess.Popen | None = None
         self.error: str | None = None
@@ -66,7 +78,8 @@ class Near(threading.Thread):
         if self.proc is None or self.proc.poll() is not None:
             return
         try:
-            self.proc.stdin.write(f"near {seq} {x:.0f} {y:.0f} {self.radius:.0f}\n")
+            wide = f" {self.around:.0f}" if self.around > 0 else ""
+            self.proc.stdin.write(f"near {seq} {x:.0f} {y:.0f} {self.radius:.0f}{wide}\n")
             self.proc.stdin.flush()
         except OSError:  # gone: no more answers
             self.proc = None

@@ -228,3 +228,74 @@ def test_the_gaze_on_the_zoom_is_mapped_back_to_real_pixels():
     assert track.unzoom((800, 400), zoom).tolist() == [800, 400]
     assert track.unzoom((2000, 370), zoom).tolist() == [2000, 370]  # outside the zoomed tile: as it is
     assert list(track.unzoom((860, 370), None)) == [860, 370]
+
+
+def test_a_click_says_how_the_pointer_got_there():
+    p = track.Pointer(SIZE, jump=300, jump_time=0.15, head_gain=2000)
+    assert p.landing(0.0) is None  # nowhere yet
+    p.update(0.0, (-60, 500), (0, 0))  # past the left edge: landed on it, the gaze kept as it was
+    p.update(0.5, (-60, 500), (-0.01, 0))  # then the head moves it 20 px right
+    j = p.landing(0.6)
+    assert j["kind"] == "gaze" and j["landed"] == [0.0, 500.0] and j["gaze"] == [-60.0, 500.0]
+    assert j["head"] == [20.0, 0.0] and j["at"] == [20.0, 500.0] and j["age"] == 0.6
+    assert "snap" not in j
+    p.update(0.7, (2060, 560), (0, 0))
+    p.update(0.9, (2060, 560), (0, 0))  # jump 2, and dune-a11y moves it onto a button
+    assert p.snap_to(2, (2000, 494))
+    j = p.landing(1.0)
+    assert j["landed"] == [2000.0, 494.0] and j["gaze"] == [2060.0, 560.0] and j["snap"] == [-60.0, -66.0]
+
+
+def test_a_click_after_the_hand_or_a_put_says_so():
+    p = track.Pointer(SIZE, hand_time=0.5)
+    p.update(0.0, (500, 500), (0, 0))
+    p.hand(0.1, (900, 300))
+    p.update(0.2, (500, 500), (0, 0))
+    j = p.landing(0.3)
+    assert j["kind"] == "hand" and j["landed"] == [900.0, 300.0] and "gaze" not in j
+    p.hand(1.0, (100, 100), "put")
+    p.update(1.1, (500, 500), (0, 0))
+    assert p.landing(1.2)["kind"] == "put"
+
+
+def test_back_from_a_head_step_lands_as_back():
+    p = track.Pointer(SIZE, head_gain=2000, head_screen=0.0, step_at=(0.4, -0.3))
+    p.update(0.0, (1000, 500), (0, 0))
+    p.update(0.1, (1000, 500), (0.5, 0))  # turned: one tile left
+    p.update(0.2, (1200, 500), (0.0, 0))  # back: lands on the gaze
+    p.update(0.25, (1200, 500), (0.0, 0))
+    assert p.landing(0.3)["kind"] == "back"
+
+
+def test_after_the_hand_the_jump_it_put_right_is_kept():
+    p = track.Pointer(SIZE, jump=300, jump_time=0.15, head_gain=2000, hand_time=0.5)
+    p.update(0.0, (500, 500), (0, 0))
+    p.update(0.03, (2060, 560), (0, 0))
+    p.update(0.20, (2060, 560), (0, 0))  # jump 2
+    assert p.snap_to(2, (2000, 494))
+    p.update(0.30, (2060, 560), (-0.01, 0))  # the head 20 px right
+    p.hand(0.40, (1700, 640))  # then the mouse puts it right
+    p.hand(0.45, (1690, 650))
+    p.update(0.50, (2060, 560), (0, 0))
+    j = p.landing(0.60)
+    assert j["kind"] == "hand" and j["landed"] == [1690.0, 650.0]
+    b = j["before"]
+    assert b["kind"] == "gaze" and b["landed"] == [2000.0, 494.0] and b["gaze"] == [2060.0, 560.0]
+    assert b["snap"] == [-60.0, -66.0] and b["at"] == [2020.0, 494.0] and b["head"] == [20.0, 0.0]
+    assert b["age"] == 0.4 and p.before_seq == 2
+    p.hand(1.0, (1600, 600))  # moved again: still that jump
+    p.update(1.1, (1600, 600), (0, 0))
+    assert p.landing(1.2)["before"]["landed"] == [2000.0, 494.0]
+
+
+def test_a_new_jump_forgets_the_one_before_the_hand():
+    p = track.Pointer(SIZE, jump=300, jump_time=0.15, hand_time=0.5)
+    p.update(0.0, (500, 500), (0, 0))
+    p.hand(0.1, (900, 300))
+    p.update(0.2, (500, 500), (0, 0))
+    assert p.landing(0.3)["before"]["landed"] == [500.0, 500.0]
+    p.update(0.8, (500, 500), (0, 0))  # the hand gone, the gaze where it was then
+    p.update(0.9, (1800, 300), (0, 0))  # then it moves away: a jump
+    p.update(1.1, (1800, 300), (0, 0))
+    j = p.landing(1.2)
+    assert j["kind"] == "gaze" and "before" not in j and p.before is None
