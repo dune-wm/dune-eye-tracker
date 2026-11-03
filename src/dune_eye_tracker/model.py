@@ -30,11 +30,13 @@ def design(x: np.ndarray, quad: list[int]) -> np.ndarray:
     return np.column_stack(cols)
 
 
-def ridge(a: np.ndarray, y: np.ndarray, lam: float) -> np.ndarray:
-    """Least squares with `lam` on every weight but the intercept's."""
+def ridge(a: np.ndarray, y: np.ndarray, lam: float, w: np.ndarray | None = None) -> np.ndarray:
+    """Least squares with `lam` on every weight but the intercept's; with `w`, each row
+    counts that much."""
     reg = lam * np.eye(a.shape[1])
     reg[0, 0] = 0.0
-    return np.linalg.solve(a.T @ a + reg, a.T @ y)
+    aw = a if w is None else a * w[:, None]
+    return np.linalg.solve(aw.T @ a + reg, aw.T @ y)
 
 
 @dataclass
@@ -188,11 +190,12 @@ def fit_head(
     groups: np.ndarray,
     ref: dict[str, float],
     size: tuple[float, float] | None = None,
+    weights: np.ndarray | None = None,
 ):
     """A `HeadFix` on samples looking at `targets` with the head moving (with `size`, the
     screen's, the gaze terms too), and how it does on each point left out: (fix, eyes
     alone, with the fix), each the median over the points of the mean distance of a guess
-    from it (px)."""
+    from it (px). `weights`: how much each sample counts in the fit (1 each without)."""
     names = FIX_COLUMNS
     # the calibration keeps the head's place; the openness it did not: the samples' own
     ref_v = np.array([ref[c] if c in ref else float(np.median([r[c] for r in rows])) for c in names], dtype=float)
@@ -210,14 +213,14 @@ def fit_head(
         alone, fixed = [], []
         for g in np.unique(groups):
             out = groups == g
-            w = ridge(a[~out], residual[~out], lam)
+            w = ridge(a[~out], residual[~out], lam, None if weights is None else weights[~out])
             alone.append(float(np.linalg.norm(residual[out], axis=1).mean()))
             fixed.append(float(np.linalg.norm(residual[out] - a[out] @ w, axis=1).mean()))
         return alone, fixed
 
     best = min(HEAD_LAMBDAS, key=lambda lam: float(np.mean(point_errors(lam)[1])))
     alone, fixed = point_errors(best)
-    w = ridge(a, residual, best)
+    w = ridge(a, residual, best, weights)
     fix = HeadFix(ref_v, w[0], w[1:] / scale[:, None], mid, names)
     return fix, float(np.median(alone)), float(np.median(fixed))
 

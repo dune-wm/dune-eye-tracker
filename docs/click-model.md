@@ -28,14 +28,22 @@ stop caring, not a cap; ~400 bytes a click, 100 000 clicks ~40 MB).
 
 | Field | What |
 |---|---|
-| `time` | when (local), for recency and for splitting in order |
+| `time` | when (local; to the millisecond from 2026-11-03), for recency and for splitting in order |
 | `calibration` | the calibration in use (its `time`): guesses of different calibrations differ |
 | `output`, `size` | the monitor and its size |
 | `seen` | where the click was seen, px (the magnified point while zoomed) |
 | `guess` | the gaze guess then (the median of the frames before it, with the click fix) |
 | `spread` | how much the guess moved in those frames, px: above `STEADY` (100) the click fix does not learn from it; the model may |
 | `feats` | the eyes' and head's numbers (median of the frames): a guess can be made again with another calibration |
+| `by` | what made it (2026-11-03 on): `mouse`, `key` (right Ctrl+Shift), `command` (`dune pointer click`: voice "click"), `name` ("click on X", dune-a11y: `seen` is the thing's middle); none from an older dune |
+| `button` | `left` or `right` |
+| `hand` | whether the mouse moved the pointer just before it (0.5 s): a key click after the mouse put it right is as good as the mouse's |
+| `said` | what came of it: `kept (N px off)` or why not |
 | `ctx` | the tile, as below |
+
+The click fix weighs its clicks by `by` (`clicks.WEIGHTS`): mouse 1, key and command 0.5,
+name 0.25 (older clicks without it: 1). A key or voice click lands where the gaze already
+put the pointer, so it partly teaches the fix its own guess; the mouse is where you meant.
 
 The click fix has its own, bounded data (it is fitted on every frame, and only means
 something for one calibration): each click it keeps goes in

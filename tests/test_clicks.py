@@ -150,3 +150,37 @@ def test_every_click_goes_in_the_log_for_good(tmp_path):
     assert first["seen"] == [812, 440] and first["ctx"] == ctx and first["calibration"] == "2026-11-02T09:49:44"
     assert set(first["feats"]) >= {"eye_u", "eye_v", "head_x", "open"} and first["spread"] < clicks.STEADY
     assert second["spread"] > clicks.STEADY and "ctx" not in second
+
+
+def test_what_made_a_click_is_heard_and_kept(tmp_path):
+    line = {"event": "pointer", "change": "click", "button": "left", "by": "key", "x": 1, "y": 2, "output": "M"}
+    assert clicks.how(line) == {"by": "key", "button": "left"}
+    assert clicks.how({"event": "pointer", "change": "click", "button": "right", "x": 1, "y": 2}) == {"button": "right"}
+    rng = np.random.default_rng(8)
+    data, eyes = calibration(rng)
+    path = tmp_path / "calibration.json"
+    learner = clicks.ClickLearner(data, eyes, None, path)
+    t = look(learner, 0.0, 812, 440, rng)
+    assert learner.click(t, 812, 440, "HDMI-A-1", None, {"by": "key", "button": "left", "hand": False}).startswith("kept")
+    t = look(learner, 1.0, 900, 500, rng)
+    assert learner.click(t, 900, 500, "HDMI-A-1").startswith("kept")  # an older dune: nothing said
+    assert [s.get("by") for s in learner.samples[:: len(learner.samples) - 1]] == ["key", None]
+    assert list(learner.weights(learner.samples[:1] + learner.samples[-1:])) == [0.5, 1.0]
+    logged = [json.loads(l) for l in (tmp_path / clicks.LOG).read_text().splitlines()]
+    assert logged[0]["by"] == "key" and logged[0]["button"] == "left" and logged[0]["hand"] is False
+    assert logged[0]["said"].startswith("kept") and len(logged[0]["time"]) == len("2026-11-03T10:41:13.123")
+    assert "by" not in logged[1]
+
+
+def test_the_mouse_counts_more_than_a_key_and_a_name_least():
+    assert clicks.weight("mouse") > clicks.weight("key") == clicks.weight("command") > clicks.weight("name") > 0
+    assert clicks.weight(None) == 1.0
+
+
+def test_a_weighted_fit_leans_to_the_heavier_samples():
+    # two halves that disagree on the bias: the heavier half wins
+    a = np.ones((20, 1))
+    y = np.concatenate([np.zeros(10), np.full(10, 10.0)])[:, None]
+    w = np.concatenate([np.full(10, 1.0), np.full(10, 0.25)])
+    assert abs(model.ridge(a, y, 0.0)[0, 0] - 5.0) < 1e-9
+    assert abs(model.ridge(a, y, 0.0, w)[0, 0] - 2.0) < 1e-9

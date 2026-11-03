@@ -118,6 +118,10 @@ class Pointer:
         self.hand_gaze = None
         self.elsewhere = xy is None
 
+    def hand_now(self, t: float) -> bool:
+        """Whether the mouse moved the pointer just before `t` (`HAND_TIME`)."""
+        return self.hand_until is not None and t < self.hand_until
+
     def update(self, t: float, gaze, head) -> tuple[int, int] | None:
         """The pixel to move the pointer to, or None when it stays where it is (or is let
         go). `gaze` is not kept on the screen: off it is how looking away shows."""
@@ -378,8 +382,12 @@ def run(args) -> int:
                 continue
             last_seq = sample.seq
             for _, t, x, y in puts.pending() if puts is not None else ():
-                # dune-a11y clicked something there (by voice): the pointer onto it, left
-                # there as the mouse leaves it, until you look elsewhere
+                # dune-a11y clicked something there (by voice, "click on X"): a click the
+                # least trusted (`clicks.WEIGHTS`), you looked at it somewhere; then the
+                # pointer onto it, left there as the mouse leaves it, until you look elsewhere
+                said = learner.click(t, x, y, output, None, {"by": "name", "button": "left", "hand": pointer.hand_now(t)})
+                if args.verbose:
+                    print(f"click on {x} {y} (dune-a11y): {said}", flush=True)
                 pointer.hand(t, (x, y))
                 try:
                     move(x, y, output)
@@ -388,7 +396,7 @@ def run(args) -> int:
                     return 1
                 if args.verbose:
                     print(f"put {x} {y} (dune-a11y)", flush=True)
-            for change, t, x, y, out, ctx in clicks.pending():
+            for change, t, x, y, out, ctx, how in clicks.pending():
                 if change == "zoom":
                     if out == output:
                         # magnified: the gaze mapped back, the head and the jumps 1/scale
@@ -401,7 +409,7 @@ def run(args) -> int:
                 if change == "move":
                     pointer.hand(t, (x, y) if out == output else None)
                     continue
-                said = learner.click(t, x, y, out, ctx)
+                said = learner.click(t, x, y, out, ctx, how | {"hand": pointer.hand_now(t)})
                 if args.verbose:
                     print(f"click {x} {y} {out}: {said}", flush=True)
             if note := learner.refit_background():  # fits in a thread: the pointer goes on

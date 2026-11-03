@@ -19,12 +19,15 @@ each point left out with the eyes alone and with the head, and `run` uses it onl
 is better (then "off the screen" comes from it too). A new `calibrate` drops it.
 
 While `run` goes, **every click teaches it** (look at the pointer when you click): it
-hears them from `dune events pointer` (the mouse's, and dune-voice's "click"), keeps the
+hears them from `dune events pointer` (the mouse's, right Ctrl+Shift, dune-voice's "click",
+and "click on X" through dune-a11y), keeps the
 camera's samples from just before a click on the calibrated monitor when the gaze was
 steady, wherever it guessed you looked (it trusts you look at the pointer), and every 5 clicks (the first after 10) fits a fix (head,
 gaze and how open the eyes are, `clicks.py`) on them, used when it does no worse on the
 last 50 clicks (half of them while there are fewer; up to 15% worse still counts, as the
-fix in use has seen most of them). The eyes' openness counts because looking down the lids close and the iris
+fix in use has seen most of them). Not all clicks count the same: the mouse's 1, right
+Ctrl+Shift and voice "click" 0.5 (the pointer was where the gaze put it), "click on X" 0.25
+(`clicks.WEIGHTS`; dune says which since 2026-11-03, `by`). The eyes' openness counts because looking down the lids close and the iris
 reads higher than it is (on 400 clicks: 221 px off without it, 193 with it, each click
 left out); a fix learnt before it keeps working until the next fit replaces it. With a dune from
 2026-11-02 on, each click also keeps the tile it was on: its app, where in it and its size
@@ -56,7 +59,8 @@ head still moves it from there. Apps show their tree only with accessibility on
 (`dune-a11y enable`, which `dune-session` runs); floating windows have none. A click by
 voice ("click reply", dune-a11y) puts the pointer on what it clicked, through
 `$XDG_RUNTIME_DIR/dune-eye-tracker.sock`: it stays there, as after the mouse, until you
-look elsewhere (and teaches nothing: it is not where you looked).
+look elsewhere, and teaches it a little (a click there, the least trusted: you looked at it
+somewhere).
 
 **Zoom for the last pixels.** dune's `zoom` key (Mod+z, or saying "zoom") magnifies the
 tile under the pointer 3x around it. While it is in, the gaze on the magnified tile is

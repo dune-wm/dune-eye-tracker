@@ -19,6 +19,7 @@ import subprocess
 import threading
 import time
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
 
@@ -42,6 +43,16 @@ KEEP = 1000
 # every click, one line, never cut: the click model's data (`ClickLearner.log`)
 LOG = "clicks.jsonl"
 MIN_SAMPLES = 3
+# how much a click counts in a fit, by what made it (dune's `by`): the mouse is where you
+# meant; right Ctrl+Shift or a voice "click" land where the gaze already put the pointer
+# (they partly teach it its own guess); "click on X" (dune-a11y, `name`) is the middle of
+# a named thing, which you looked at somewhere. A click without (an older dune, the
+# samples kept before): 1, as ever.
+WEIGHTS = {"mouse": 1.0, "key": 0.5, "command": 0.5, "name": 0.25}
+
+
+def weight(by: str | None) -> float:
+    return WEIGHTS.get(by, 1.0) if by is not None else 1.0
 
 
 class ClickLearner:
@@ -63,12 +74,17 @@ class ClickLearner:
     def seen(self, t: float, feats: dict):
         self.history.append((t, feats))
 
-    def click(self, t: float, x: int, y: int, output: str, ctx: dict | None = None) -> str:
+    def click(
+        self, t: float, x: int, y: int, output: str, ctx: dict | None = None,
+        how: dict | None = None,
+    ) -> str:
         """A click at `t` (this clock): what came of it ("kept", or why not). `ctx`, from
         dune, is the tile it was on (`context`): kept with it, for learning where clicks go
-        inside each app's window."""
+        inside each app's window. `how`: what made it (`by`, `WEIGHTS`), the `button`, and
+        whether the mouse had just moved the pointer (`hand`); `by` is kept with it."""
         if output != self.output:
             return "other monitor"
+        how = how or {}
         rows = [f for (ts, f) in self.history if t - BEFORE <= ts <= t - AFTER and f["open"] >= BLINK]
         if len(rows) < MIN_SAMPLES:
             self.skipped += 1
@@ -76,13 +92,14 @@ class ClickLearner:
         g = self.guess(rows)
         mid = np.median(g, axis=0)
         spread = float(np.sqrt((np.linalg.norm(g - mid, axis=1) ** 2).mean()))
-        self.log(x, y, rows, mid, spread, ctx)
         if spread > STEADY:
             self.skipped += 1
-            return f"gaze moving ({spread:.0f} px)"
+            said = f"gaze moving ({spread:.0f} px)"
+            self.log(x, y, rows, mid, spread, ctx, how, said)
+            return said
         far = float(np.linalg.norm(mid - (x, y)))
         w, h = self.size
-        extra = {"ctx": ctx} if ctx else {}
+        extra = ({"ctx": ctx} if ctx else {}) | ({"by": how["by"]} if how.get("by") else {})
         self.samples += [{"point": self.next_id, "target": [x / w, y / h], "feats": f} | extra for f in rows]
         self.next_id += 1
         self.kept += 1
@@ -91,17 +108,23 @@ class ClickLearner:
         if len(ids) > KEEP:
             old = set(ids[: len(ids) - KEEP])
             self.samples = [s for s in self.samples if s["point"] not in old]
-        return f"kept ({far:.0f} px off)"
+        said = f"kept ({far:.0f} px off)"
+        self.log(x, y, rows, mid, spread, ctx, how, said)
+        return said
 
-    def log(self, x: int, y: int, rows: list[dict], guess, spread: float, ctx: dict | None):
+    def log(
+        self, x: int, y: int, rows: list[dict], guess, spread: float, ctx: dict | None,
+        how: dict | None = None, said: str = "",
+    ):
         """One line per click in `clicks.jsonl` beside calibration.json, never cut and kept
         across calibrations: the data of a model of where clicks go (docs/click-model.md),
         for as long as more of it still helps. The eyes' numbers (the median of the frames
         before it) are kept, not only the guess, so a guess can be made again with another
-        calibration; a moving gaze too, marked (`spread`)."""
+        calibration; a moving gaze too, marked (`spread`). `how` (by, button, hand) and what
+        came of it (`said`) go with it; the time to the millisecond."""
         feats = {k: float(np.median([r[k] for r in rows])) for k in rows[0]}
         line = {
-            "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "time": datetime.now().isoformat(timespec="milliseconds"),
             "calibration": self.data.get("time"),
             "output": self.output,
             "size": list(self.size),
@@ -109,7 +132,7 @@ class ClickLearner:
             "guess": [round(float(guess[0]), 1), round(float(guess[1]), 1)],
             "spread": round(spread, 1),
             "feats": feats,
-        } | ({"ctx": ctx} if ctx else {})
+        } | (how or {}) | ({"said": said} if said else {}) | ({"ctx": ctx} if ctx else {})
         try:
             with open(self.path.with_name(LOG), "a") as f:
                 f.write(json.dumps(line) + "\n")
@@ -121,6 +144,10 @@ class ClickLearner:
         rows = [s["feats"] for s in samples]
         targets = np.array([[s["target"][0] * w, s["target"][1] * h] for s in samples])
         return rows, targets, np.array([s["point"] for s in samples])
+
+    def weights(self, samples: list[dict]) -> np.ndarray:
+        """How much each sample counts in a fit (`WEIGHTS`; the head calibration's: 1)."""
+        return np.array([weight(s.get("by")) for s in samples])
 
     def due(self) -> tuple | None:
         """Every `REFIT` clicks kept: what a fit is made from (the clicks as they are now,
@@ -144,7 +171,7 @@ class ClickLearner:
         recent = set(ids[-checked:])
         train = head + [s for s in samples if s["point"] not in recent]
         test = [s for s in samples if s["point"] in recent]
-        candidate, _, _ = model.fit_head(self.eyes, *self.arrays(train), ref, self.size)
+        candidate, _, _ = model.fit_head(self.eyes, *self.arrays(train), ref, self.size, self.weights(train))
         rows, targets, groups = self.arrays(test)
         guess = self.eyes.predict(rows)
         now = model.error(fix.correct(guess, rows) if fix else guess, targets, groups)
@@ -152,7 +179,7 @@ class ClickLearner:
         note = f"{len(ids)} clicks: on the last {checked}, {now:.0f} px off now, {new:.0f} with the new fit"
         if new > now * MARGIN:
             return None, None, note + ": kept the old one"
-        full, _, _ = model.fit_head(self.eyes, *self.arrays(head + samples), ref, self.size)
+        full, _, _ = model.fit_head(self.eyes, *self.arrays(head + samples), ref, self.size, self.weights(head + samples))
         return full, {"clicks": len(ids), "before": now, "after": new}, note + ": used"
 
     def apply(self, result) -> str:
@@ -224,6 +251,12 @@ def seen(event: dict) -> tuple[int, int, dict | None]:
     return event["zoom_x"], event["zoom_y"], (ctx or {}) | zoomed
 
 
+def how(event: dict) -> dict:
+    """What made a `dune events pointer` click (`by`: mouse, key, command; none from an
+    older dune) and which button."""
+    return {k: event[k] for k in ("by", "button") if k in event}
+
+
 def zoom_of(event: dict) -> dict | None:
     """A `zoom` `in` line: center, scale and area (monitor coordinates); None for `out`."""
     if event.get("change") != "in":
@@ -234,9 +267,9 @@ def zoom_of(event: dict) -> dict | None:
 
 class Clicks(threading.Thread):
     """`dune events pointer,zoom`, in the background: ("click", time heard, x, y, output,
-    the tile it was on) of each left or right click on a queue, (x, y) where it was seen;
-    ("move", ..., None) as the mouse moves the pointer; ("zoom", t, 0, 0, output, the zoom
-    or None) as dune's zoom goes in or out."""
+    the tile it was on, `how` it was made) of each left or right click on a queue, (x, y)
+    where it was seen; ("move", ..., None, None) as the mouse moves the pointer; ("zoom",
+    t, 0, 0, output, the zoom or None, None) as dune's zoom goes in or out."""
 
     def __init__(self):
         super().__init__(daemon=True)
@@ -255,14 +288,14 @@ class Clicks(threading.Thread):
             except ValueError:
                 continue
             if e.get("event") == "zoom" and "output" in e:
-                self.queue.put(("zoom", t, 0, 0, e["output"], zoom_of(e)))
+                self.queue.put(("zoom", t, 0, 0, e["output"], zoom_of(e), None))
                 continue
             if e.get("event") != "pointer":
                 continue
             if e.get("change") == "move":
-                self.queue.put(("move", t, e["x"], e["y"], e["output"], None))
+                self.queue.put(("move", t, e["x"], e["y"], e["output"], None, None))
             elif e.get("button") in ("left", "right"):
-                self.queue.put(("click", t, *seen(e)[:2], e["output"], seen(e)[2]))
+                self.queue.put(("click", t, *seen(e)[:2], e["output"], seen(e)[2], how(e)))
 
     def pending(self):
         while True:
