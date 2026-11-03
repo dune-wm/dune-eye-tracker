@@ -1,10 +1,11 @@
 # dune-eye-tracker
 
-The mouse pointer in [dune](../dune), moved by where you look, with a webcam.
+The mouse pointer in [dune](https://github.com/dune-wm/dune), moved by where you look, with a webcam.
 
 ## Drive the pointer
 
 ```sh
+git clone https://github.com/dune-wm/dune-eye-tracker && cd dune-eye-tracker
 uv tool install --editable .        # dune-eye-tracker in ~/.local/bin
 dune-eye-tracker calibrate          # once, and again when you sit differently
 ```
@@ -49,7 +50,7 @@ Then `dune-eye-tracker toggle` starts it in the background, and again stops it (
 calibration it opens `calibrate`. `dune-eye-tracker run [-v] [--head-gain PX]` is the
 same in the foreground.
 
-**Landing on buttons.** With [dune-a11y](../dune-a11y) installed, a jump lands on the
+**Landing on buttons.** With [dune-a11y](https://github.com/dune-wm/dune-a11y) installed, a jump lands on the
 middle of the button, link, tab or menu item nearest where you look (within 90 px,
 `--snap PX`; 0: off), from the apps' accessibility trees: at each jump `dune-a11y serve
 OUTPUT` is asked what is near (it reads only that part of that window, in a few ms, and
