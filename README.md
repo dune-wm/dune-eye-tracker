@@ -2,6 +2,10 @@
 
 The mouse pointer in [dune](https://github.com/dune-wm/dune), moved by where you look, with a webcam.
 
+It all runs on this computer: the camera's images are read and dropped in memory, never
+saved nor sent; only numbers are kept (calibration, runs, clicks), in `~/.local/state`.
+The face model (MediaPipe's `face_landmarker.task`) is downloaded once, by hand.
+
 ## Drive the pointer
 
 ```sh
