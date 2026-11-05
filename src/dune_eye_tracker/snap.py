@@ -16,7 +16,9 @@ import time
 from pathlib import Path
 from queue import Empty, Queue
 
-SNAP = 90.0  # px: a thing this near the gaze takes the jump
+# px: a thing this near the gaze takes the jump (90 till 2026-11-04: on that day's 54 snapped
+# landings before a click, as many took the pointer away from the click as towards it)
+SNAP = 45.0
 # px: what can be clicked this near a jump is asked for too, for the log of clicks only
 # (the candidates a model of where clicks go chooses among: the gaze is ~180 px off)
 AROUND = 250.0

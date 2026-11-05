@@ -1,116 +1,6 @@
 import json
 
-import numpy as np
-
-from dune_eye_tracker import clicks, model
-from dune_eye_tracker.measure import CALIBRATION
-from test_model import fake_feats
-
-SIZE = (2560, 1080)
-
-
-def calibration(rng):
-    samples = [
-        {"point": i, "target": [x, y], "feats": fake_feats(x, y, rng, 0.001)}
-        for i, (x, y) in enumerate(CALIBRATION)
-        for _ in range(20)
-    ]
-    data = {"size": list(SIZE), "output": "HDMI-A-1", "head": dict.fromkeys(model.HEAD_COLUMNS, 0.0), "calibration": samples}
-    rows = [s["feats"] for s in samples]
-    targets = np.array([[s["target"][0] * SIZE[0], s["target"][1] * SIZE[1]] for s in samples])
-    eyes = model.fit(rows, targets, np.array([s["point"] for s in samples]), "eyes")
-    return data, eyes
-
-
-def look(learner, t0, x, y, rng, drift=(0.0, 0.0), head=0.0):
-    """Frames of someone looking at (x, y) px for 0.5 s; the eyes model off by `drift`
-    (0..1 of the screen) and the head turned by `head`."""
-    for i in range(15):
-        f = fake_feats(x / SIZE[0] + drift[0], y / SIZE[1] + drift[1], rng, 0.001)
-        f |= {"head_x": head, "eye_u": f["eye_u"] + 0.6 * head}
-        learner.seen(t0 + i / 30, f)
-    return t0 + 0.5
-
-
-def test_a_click_is_trusted_however_far_the_guess(tmp_path):
-    rng = np.random.default_rng(4)
-    data, eyes = calibration(rng)
-    learner = clicks.ClickLearner(data, eyes, None, tmp_path / "c.json")
-    t = look(learner, 0.0, 1000, 500, rng)
-    assert learner.click(t, 1010, 505, "HDMI-A-1").startswith("kept")
-    # the guess 1400 px off (not calibrated yet): you were looking at the pointer all the same
-    t = look(learner, 1.0, 1000, 500, rng)
-    assert learner.click(t, 2400, 900, "HDMI-A-1").startswith("kept (14")
-    assert learner.click(t, 1000, 500, "HDMI-A-2") == "other monitor"
-    assert learner.click(50.0, 1000, 500, "HDMI-A-1") == "no face before it"
-    assert learner.kept == 2
-
-
-def test_clicks_learn_what_the_calibration_got_wrong(tmp_path):
-    # the eyes model is off (as if you sat differently) and the head turns: clicks fix it
-    rng = np.random.default_rng(5)
-    data, eyes = calibration(rng)
-    path = tmp_path / "c.json"
-    learner = clicks.ClickLearner(data, eyes, None, path)
-    notes, t = [], 0.0
-    for i in range(40):
-        x, y = rng.uniform(200, 2360), rng.uniform(150, 930)
-        head = rng.uniform(-0.05, 0.05)
-        t = look(learner, t, x, y, rng, drift=(0.06, -0.05), head=head)
-        assert learner.click(t, int(x), int(y), "HDMI-A-1").startswith("kept"), i
-        if note := learner.refit():
-            notes.append(note)
-        t += 1.0
-    assert len(notes) == 7 and any(n.endswith("used") for n in notes)  # at 10, 15, ... 40 clicks
-    rows, targets, groups = learner.arrays(learner.samples[-150:])
-    alone = model.error(eyes.predict(rows), targets, groups)
-    assert alone > 120  # the calibration is that far off
-    assert data["click_fix"]["after"] < 40  # the clicks put it right
-    saved = json.loads(path.read_text())
-    assert len({s["point"] for s in saved["click_samples"]}) == 40
-    assert model.HeadFix.from_json(saved["click_fix"]).gaze_mid is not None
-
-
-def test_a_fit_in_the_background_lands_later_and_the_clicks_go_on(tmp_path):
-    rng = np.random.default_rng(6)
-    data, eyes = calibration(rng)
-    learner = clicks.ClickLearner(data, eyes, None, tmp_path / "c.json")
-    t, notes = 0.0, []
-    for i in range(12):
-        x, y = rng.uniform(200, 2360), rng.uniform(150, 930)
-        t = look(learner, t, x, y, rng, drift=(0.06, -0.05))
-        learner.click(t, int(x), int(y), "HDMI-A-1")
-        if note := learner.refit_background():
-            notes.append(note)
-        t += 1.0
-        if learner.job is not None:
-            break  # due at 10 clicks: started, not waited for
-    assert i == 9 and learner.job is not None and notes == []
-    learner.job.join(timeout=10)
-    note = learner.refit_background()  # done: put in use
-    assert note.startswith("10 clicks: on the last 5")  # the clicks as they were when it started
-    assert learner.job is None and learner.fix is not None
-    assert (tmp_path / "c.json").exists()
-
-
-def test_the_tile_a_click_was_on_is_kept_with_it(tmp_path):
-    rng = np.random.default_rng(7)
-    data, eyes = calibration(rng)
-    path = tmp_path / "c.json"
-    learner = clicks.ClickLearner(data, eyes, None, path)
-    line = {"event": "pointer", "change": "click", "button": "left", "x": 812, "y": 440, "output": "HDMI-A-1",
-            "tile": 3, "app_id": "vivaldi-stable", "tile_x": 200, "tile_y": 96, "tile_w": 1268, "tile_h": 1064}
-    ctx = clicks.context(line)
-    assert ctx == {"tile": 3, "app_id": "vivaldi-stable", "tile_x": 200, "tile_y": 96, "tile_w": 1268, "tile_h": 1064}
-    assert clicks.context({"event": "pointer", "change": "click", "x": 1, "y": 2, "output": "M"}) is None  # an older dune
-    t = look(learner, 0.0, 812, 440, rng)
-    assert learner.click(t, 812, 440, "HDMI-A-1", ctx).startswith("kept")
-    t = look(learner, 1.0, 900, 500, rng)
-    assert learner.click(t, 900, 500, "HDMI-A-1").startswith("kept")  # off a tile: none
-    learner.save()
-    saved = json.loads(path.read_text())["click_samples"]
-    assert all(s["ctx"] == ctx for s in saved if s["point"] == saved[0]["point"])
-    assert not any("ctx" in s for s in saved if s["point"] != saved[0]["point"])
+from dune_eye_tracker import clicks
 
 
 def test_a_click_while_zoomed_is_learnt_where_it_was_seen():
@@ -132,58 +22,10 @@ def test_zoom_lines():
     assert clicks.zoom_of({"event": "zoom", "change": "out", "output": "M"}) is None
 
 
-def test_every_click_goes_in_the_log_for_good(tmp_path):
-    rng = np.random.default_rng(8)
-    data, eyes = calibration(rng)
-    data["time"] = "2026-11-02T09:49:44"
-    learner = clicks.ClickLearner(data, eyes, None, tmp_path / "calibration.json")
-    ctx = {"tile": 3, "app_id": "vivaldi-stable", "tile_x": 200, "tile_y": 96, "tile_w": 1268, "tile_h": 1064}
-    t = look(learner, 0.0, 812, 440, rng)
-    assert learner.click(t, 812, 440, "HDMI-A-1", ctx).startswith("kept")
-    # a gaze moving before the click: not learnt from by the fix, still logged (marked)
-    for i in range(15):
-        learner.seen(1.0 + i / 30, fake_feats(0.1 + i * 0.05, 0.5, rng, 0.001))
-    assert learner.click(1.5, 900, 500, "HDMI-A-1").startswith("gaze moving")
-    lines = [json.loads(l) for l in (tmp_path / "clicks.jsonl").read_text().splitlines()]
-    assert len(lines) == 2
-    first, second = lines
-    assert first["seen"] == [812, 440] and first["ctx"] == ctx and first["calibration"] == "2026-11-02T09:49:44"
-    assert set(first["feats"]) >= {"eye_u", "eye_v", "head_x", "open"} and first["spread"] < clicks.STEADY
-    assert second["spread"] > clicks.STEADY and "ctx" not in second
-
-
-def test_what_made_a_click_is_heard_and_kept(tmp_path):
-    line = {"event": "pointer", "change": "click", "button": "left", "by": "key", "x": 1, "y": 2, "output": "M"}
-    assert clicks.how(line) == {"by": "key", "button": "left"}
-    assert clicks.how({"event": "pointer", "change": "click", "button": "right", "x": 1, "y": 2}) == {"button": "right"}
-    rng = np.random.default_rng(8)
-    data, eyes = calibration(rng)
-    path = tmp_path / "calibration.json"
-    learner = clicks.ClickLearner(data, eyes, None, path)
-    t = look(learner, 0.0, 812, 440, rng)
-    assert learner.click(t, 812, 440, "HDMI-A-1", None, {"by": "key", "button": "left", "hand": False}).startswith("kept")
-    t = look(learner, 1.0, 900, 500, rng)
-    assert learner.click(t, 900, 500, "HDMI-A-1").startswith("kept")  # an older dune: nothing said
-    assert [s.get("by") for s in learner.samples[:: len(learner.samples) - 1]] == ["key", None]
-    assert list(learner.weights(learner.samples[:1] + learner.samples[-1:])) == [0.5, 1.0]
-    logged = [json.loads(l) for l in (tmp_path / clicks.LOG).read_text().splitlines()]
-    assert logged[0]["by"] == "key" and logged[0]["button"] == "left" and logged[0]["hand"] is False
-    assert logged[0]["said"].startswith("kept") and len(logged[0]["time"]) == len("2026-11-03T10:41:13.123")
-    assert "by" not in logged[1]
-
-
-def test_the_mouse_counts_more_than_a_key_and_a_name_least():
-    assert clicks.weight("mouse") > clicks.weight("key") == clicks.weight("command") > clicks.weight("name") > 0
+def test_the_voice_counts_as_much_as_the_mouse_and_a_key_less():
+    assert clicks.weight("mouse") == clicks.weight("command") == clicks.weight("name") == 1.0
+    assert 0 < clicks.weight("key") < 1.0
     assert clicks.weight(None) == 1.0
-
-
-def test_a_weighted_fit_leans_to_the_heavier_samples():
-    # two halves that disagree on the bias: the heavier half wins
-    a = np.ones((20, 1))
-    y = np.concatenate([np.zeros(10), np.full(10, 10.0)])[:, None]
-    w = np.concatenate([np.full(10, 1.0), np.full(10, 0.25)])
-    assert abs(model.ridge(a, y, 0.0)[0, 0] - 5.0) < 1e-9
-    assert abs(model.ridge(a, y, 0.0, w)[0, 0] - 2.0) < 1e-9
 
 
 def test_the_focused_tile_is_followed_from_dunes_events():
@@ -201,14 +43,14 @@ def test_the_focused_tile_is_followed_from_dunes_events():
     assert f.at("M", 4.0) is None
 
 
-def test_what_the_tracker_knew_goes_in_the_log_only(tmp_path):
-    rng = np.random.default_rng(8)
-    data, eyes = calibration(rng)
-    learner = clicks.ClickLearner(data, eyes, None, tmp_path / "calibration.json")
-    t = look(learner, 0.0, 812, 440, rng)
-    jump = {"kind": "gaze", "landed": [800.0, 430.0], "age": 0.4, "head": [12.0, 10.0], "at": [812.0, 440.0]}
-    focus = {"tile": 3, "prev": None, "age": 9.0}
-    learner.click(t, 812, 440, "HDMI-A-1", None, {"by": "mouse", "button": "left", "hand": False, "jump": jump, "focus": focus})
-    logged = json.loads((tmp_path / clicks.LOG).read_text())
-    assert logged["jump"] == jump and logged["focus"] == focus
-    assert set(learner.samples[0]) == {"point", "target", "feats", "by"}
+def test_what_made_a_click_is_heard():
+    line = {"event": "pointer", "change": "click", "button": "left", "by": "key", "x": 1, "y": 2, "output": "M"}
+    assert clicks.how(line) == {"by": "key", "button": "left"}
+    assert clicks.how({"event": "pointer", "change": "click", "button": "right", "x": 1, "y": 2}) == {"button": "right"}
+
+
+def test_a_log_line_has_the_time_first_and_survives_a_bad_path(tmp_path):
+    clicks.log(tmp_path / clicks.LOG, {"seen": [1, 2], "by": "mouse"})
+    line = json.loads((tmp_path / clicks.LOG).read_text())
+    assert list(line)[0] == "time" and len(line["time"]) == len("2026-11-03T10:41:13.123") and line["by"] == "mouse"
+    clicks.log(tmp_path / "missing" / clicks.LOG, {"seen": [1, 2]})  # no folder: nothing, no error

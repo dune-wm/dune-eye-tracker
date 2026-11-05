@@ -9,6 +9,8 @@ dependencies = [
     "numpy>=2.5.4",
     "oneeurofilter>=0.2.1",
     "pygame-ce>=2.5.8",
+    "pyvirtualcam>=0.15.0",
+    "scipy>=1.14",
 ]
 
 [project.scripts]

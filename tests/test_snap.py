@@ -16,22 +16,23 @@ def test_answers():
 
 
 def test_a_jump_glides_onto_the_button_when_the_answer_comes():
-    p = track.Pointer(SIZE, jump=300, jump_time=0.15, head_gain=2000)
+    p = track.Pointer(SIZE)
     p.update(0.0, (500, 500), (0, 0))
-    p.update(0.03, (2060, 560), (0, 0))
-    assert p.update(0.20, (2060, 560), (0, 0)) == (2060, 560)  # lands on the gaze at once
-    assert p.landings == 2
+    for i in range(1, 14):  # the gaze goes there and holds: landing 2
+        p.update(0.03 * i, (2060, 560), (0, 0))
+    assert p.landings == 2 and p.sent == (2060, 560)
     assert p.snap_to(2, (2000, 494))  # dune-a11y: the button is there
-    assert p.update(0.23, (2060, 560), (0, 0)) == (2000, 494)
-    # and the head moves it from there
-    assert p.update(0.26, (2060, 560), (-0.01, 0)) == (2020, 494)
+    assert p.update(0.42, (2060, 560), (0, 0)) == (2000, 494)
+    # the gaze's wobble does not move it from there, the head does
+    assert p.update(0.45, (2090, 580), (0, 0)) is None
+    assert p.update(0.48, (2090, 580), (-0.01, 0)) == (2012, 494)
 
 
 def test_a_late_answer_for_an_older_jump_is_dropped():
-    p = track.Pointer(SIZE, jump=300, jump_time=0.15)
+    p = track.Pointer(SIZE)
     p.update(0.0, (500, 500), (0, 0))  # jump 1
-    p.update(0.03, (2060, 560), (0, 0))
-    p.update(0.20, (2060, 560), (0, 0))  # jump 2
+    for i in range(1, 14):
+        p.update(0.03 * i, (2060, 560), (0, 0))  # jump 2
     assert not p.snap_to(1, (520, 500))
     assert p.landed.tolist() == [2060, 560]
 

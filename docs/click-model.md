@@ -44,25 +44,25 @@ stop caring, not a cap; ~400 bytes a click, 100 000 clicks ~40 MB).
 | `focus` | the focused tile then, from `dune events window,strip`: `tile`, the one before (`prev`), `age` (s since focus changed), its rectangle on the monitor (`x`, `y`, `w`, `h`); with `focus_follows_mouse` it is mostly the tile under the pointer |
 | `around` | what could be clicked within `snap.AROUND` (250 px) of where the gaze's jump landed (dune-a11y, at the jump): the jump of `kind` gaze or back, else the one in `before`: `x`, `y`, `w`, `h`, `role`, `focused` when it had the keyboard focus. No names |
 
-The click fix weighs its clicks by `by` (`clicks.WEIGHTS`): mouse 1, key and command 0.5,
-name 0.25 (older clicks without it: 1). A key or voice click lands where the gaze already
-put the pointer, so it partly teaches the fix its own guess; the mouse is where you meant.
+The gaze's fits weigh their clicks by `by` (`clicks.WEIGHTS`): mouse, command and name 1,
+key 0.5 (older clicks without it: 1). A key click lands where the gaze already put the
+pointer, so it partly teaches the fit its own guess. The vertical shift still comes from
+the mouse's clicks alone (`clicks.by_hand`).
 
-The click fix has its own, bounded data (it is fitted on every frame, and only means
-something for one calibration): each click it keeps goes in
-`~/.local/state/dune-eye-tracker/calibration.json`,
-`click_samples`: one row per camera frame of the 0.35–0.05 s before the click (the eyes
-there, the hand not yet), at most `KEEP` (1000) clicks, the last ones.
+The gaze has its own, bounded data (since 2026-11-04, the geometric gaze; before it the
+eyes model's `click_samples` in calibration.json, `eye_u`, `eye_v`...): each click it keeps
+goes in `~/.local/state/dune-eye-tracker/gaze.npz`, a recording's `click` block: every
+camera frame of the 0.35–0.05 s before the click (the eyes there, the hand not yet) with its
+478 landmarks, the face's pose and the iris found in the full frame, `target` where the
+click was **seen** (px; while dune's zoom was in, the magnified point: the eyes were there),
+`since` < 0 (s before the click), and `by` per click in its meta; at most `gaze.KEEP` (300)
+clicks, the last ones. It can be guessed again by any model (`dune-eye-tracker eval
+gaze.npz`).
 
-| Field | What |
-|---|---|
-| `point` | the click's id (every frame of one click has it) |
-| `target` | where the click was **seen**, 0..1 of the monitor (x / width, y / height). While dune's zoom was in, the magnified point: the eyes were there |
-| `feats` | the frame: `eye_u`, `eye_v`, `head_x`, `head_y`, `pos_x`, `pos_y`, `pos_z`, `open` (see `features.py`) |
-| `ctx` | from dune (a dune from 2026-11-02 on), when the click was on a tile: `tile`, `app_id`, `tile_x`, `tile_y` (from the tile's corner), `tile_w`, `tile_h`; and while zoomed `real_x`, `real_y` (where the click went) and `zoom_scale` |
-
-The gaze guess for a frame is `eyes.predict(feats)` corrected by the click fix (`track.
-load_calibration`, `track.head_fix`); a click's guess is the median of its frames'.
+In `clicks.jsonl` since then: `feats` is the head of the frames before it (`head_x`,
+`head_y`, `pos_x`, `pos_y`, `pos_z`, `open`, medians), `guess` the gaze as the pointer had
+it (the clicks' shift taken off) and `calibration` the calibration's time; the lines from
+before carry the eyes model's `feats` (`eye_u`, `eye_v` too) and its guess.
 
 Not kept yet, worth adding when a stage needs it: the time of the click (for recency), the
 window's title (a page, not only an app), and whether the pointer was put there by the

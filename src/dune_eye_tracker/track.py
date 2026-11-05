@@ -1,11 +1,15 @@
 """`dune-eye-tracker run`: the pointer goes where you look.
 
-No window. The eyes model is fitted on the samples `calibrate` saved; each frame with a
-face and the eyes open gives a gaze point, and the head where it points. Both go
-through a One Euro filter (steady while still, quick when they move). The gaze only gets
-the pointer near (a webcam is ~3° off): when it is far from the pointer (`JUMP` px for
-`JUMP_TIME` s) the pointer jumps there; between jumps the head moves it from where it
-landed, turned a little for the last few pixels (MAGIC pointing, Zhai 1999). The pointer glides there (`GLIDE`), not a bee. Without a
+No window. The gaze (`gaze`: the eyes in the head in 3D, fitted on `calibrate`'s points and
+kept fitted by the clicks) gives, each frame with a face, the iris and the eyes open, a
+point on the screen; the head where it points. Both go
+through a One Euro filter (steady while still, quick when they move). The pointer moves
+only to where you fix your eyes: it stays put while the gaze wanders (reading, a glance:
+the eyes move all the time, and a pointer glued to them is everywhere), and once the gaze
+holds still (within `SETTLE` px for `SETTLE_TIME` s) more than `DEAD` px from where the
+pointer last landed, it glides there: a landing, where dune-a11y is asked for a button.
+Between landings the head moves it from where it landed, turned a little for the last few
+pixels (MAGIC pointing, Zhai 1999); turned far to a side it steps a tile. The pointer glides there (`GLIDE`), not a bee. Without a
 face, or blinking, the pointer stays. Looking off the screen (`AWAY` px past an edge
 for `AWAY_TIME` s: the monitor below, the keyboard) lets go of the pointer, for the
 mouse; looking back on it takes it again. Moving the mouse also takes the pointer for the
@@ -16,27 +20,35 @@ look, until the mouse brings it back to this one. `toggle` starts and stops it.
 
 from __future__ import annotations
 
-import json
 import os
 import signal
 import socket
 import subprocess
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 import numpy as np
 from OneEuroFilter import OneEuroFilter
 
-from . import model
-from .clicks import ClickLearner, Clicks
-from .features import BLINK, Camera
-from .measure import calibration_path, state_dir
+from . import gaze as geometric
+from .camera import BLINK, SHARE, Camera
+from .clicks import Clicks
+from .gaze import STEP_TURN
+from .recording import state_dir
 from .snap import Near, Puts
+from .trace import LOG as TRACE_LOG
+from .trace import Trace
 
-JUMP = 300.0  # px between gaze and pointer that make it jump
-JUMP_TIME = 0.15  # s the gaze stays that far first (not one wild frame)
+DEAD = 120.0  # px from the last landing a fixation must be to move the pointer
+# px: the gaze within this of its mean for `SETTLE_TIME` s is a fixation (40 px for 0.3 s
+# was too strict live: ~8 landings a minute, the pointer felt dead)
+SETTLE = 60.0
+SETTLE_TIME = 0.2
 HEAD_GAIN = 1200.0  # px per unit of head turn (0.05, about 3°: 60 px): slow, for the last pixels
+JUMP = 300.0  # px the gaze moves from where the hand left the pointer to take it back
+JUMP_TIME = 0.15  # s it stays that far first
 AWAY = 150.0  # px past an edge of the screen the gaze is "off it"
 AWAY_TIME = 0.3  # s it stays there before the pointer is let go
 HAND_TIME = 0.5  # s after the mouse last moved during which the pointer is the hand's
@@ -46,52 +58,62 @@ GLIDE = 0.1
 # Turning the head to one side further than looking at the screen takes it (the eyes may
 # stay on the screen) steps the strip one tile that way (`dune action focus_left/right`);
 # the next step waits for the head to come back `STEP_BACK` towards the middle. How far
-# is from the clicks (`step_turns`): past the 1% most turned of them by `STEP_MARGIN`,
-# else `STEP_TURN` from the calibration's head. Looking left turns `head_x` up.
-STEP_TURN = 0.35
-STEP_MARGIN = 0.08
+# is from the clicks (`gaze.Gaze.step_turns`). Looking left turns `head_x` up. The head
+# stays turned that far `STEP_HOLD` s first: reaching for a side edge turns it nearly as
+# much (on 1043 clicks, up to 0.03 short of the 1% + 0.08 it took before).
+STEP_HOLD = 0.25
 STEP_BACK = 0.15
-STEP_CLICKS = 200  # clicks it takes to know how far the head turns looking at the screen
-# px per unit of head turn for where the face points on the screen, from the T4 run
-# (head_x +0.26 / -0.27 on the left / right corners, 2150 px apart): what the eyes model
-# misses when you turn the head to the monitor below, eyes back in the middle.
-HEAD_SCREEN = 4000.0
 
 # One Euro filters (Casiez et al. 2012): Hz of the cutoff when still, and how much it
 # opens with speed (in the units of each: px for the gaze, the head's axis for the head).
-GAZE_FILTER = {"mincutoff": 0.6, "beta": 0.01}
+# the gaze's beta 0.004 (was 0.01): slower to follow speed, steadier (asked in dune-gaze's live)
+GAZE_FILTER = {"mincutoff": 0.6, "beta": 0.004}
 HEAD_FILTER = {"mincutoff": 1.0, "beta": 3.0}
+# px: the most of an edge of the screen the gaze's pointer keeps off (`usable`): dune's
+# outer gap (`gap`, 0..64) and a bar's reserved band, not the empty half of a lone narrow tile
+EDGE_MAX = 64
 FPS = 27.0
 
 
 class Pointer:
-    """Where the pointer goes, from the gaze (screen px) and the head (`head_x`,
-    `head_y`). Looking left turns `head_x` up, looking up `head_y` up: both move the
-    pointer the other way on the screen's axes."""
+    """Where the pointer goes, from the gaze (screen px, filtered) and the head (`head_x`,
+    `head_y`; looking left turns `head_x` up): the gaze lands it, the head moves it from
+    there (the other way on the screen's axes) and, turned far, steps tiles."""
 
     def __init__(
         self,
         size: tuple[float, float],
         jump: float = JUMP,
         jump_time: float = JUMP_TIME,
+        dead: float = DEAD,
+        settle: float = SETTLE,
+        settle_time: float = SETTLE_TIME,
         head_gain: float = HEAD_GAIN,
         away: float = AWAY,
         away_time: float = AWAY_TIME,
         head_ref=(0.0, 0.0),
-        head_screen: float = HEAD_SCREEN,
         hand_time: float = HAND_TIME,
         glide: float = 0.0,
         step_at: tuple[float, float] | None = None,
+        step_hold: float = STEP_HOLD,
     ):
         self.size = np.array(size, dtype=float)
-        self.jump, self.jump_time, self.gain = jump, jump_time, head_gain
+        # where the gaze may put it (x0, y0, x1, y1): the screen, less dune's outer gap and
+        # bars once dune's layout says where the tiles are (`usable`); the hand goes anywhere
+        self.area = np.array([0.0, 0.0, self.size[0] - 1, self.size[1] - 1])
+        self.jump, self.jump_time = jump, jump_time
+        self.dead, self.settle, self.settle_time = dead, settle, settle_time
+        self.gain = head_gain
+        self.head0: np.ndarray | None = None  # the head when it landed: it moves it from there
         self.away, self.away_time = away, away_time
-        self.head_ref, self.head_screen = np.asarray(head_ref, dtype=float), head_screen
+        self.head_ref = np.asarray(head_ref, dtype=float)
         self.away_since: float | None = None
         self.released = False  # looking off the screen: the pointer is the mouse's
         self.at: np.ndarray | None = None  # where the pointer is
-        self.landed: np.ndarray | None = None  # where the last jump put it
-        self.head0: np.ndarray | None = None  # and the head then
+        self.landed: np.ndarray | None = None  # where the last landing put it
+        self.anchor: np.ndarray | None = None  # the gaze there (unclipped): `DEAD` counts from it
+        self.came_from: np.ndarray | None = None  # and for the last landing (None: it was not here)
+        self.recent: deque = deque(maxlen=30)  # (t, gaze) of the last frames: whether it settled
         self.far_since: float | None = None
         self.sent: tuple[int, int] | None = None
         self.hand_time = hand_time
@@ -105,6 +127,8 @@ class Pointer:
         # `head_x` past which the head steps the strip left / right (None: from `head_ref`)
         ref = float(self.head_ref[0])
         self.step_at = step_at or (ref + STEP_TURN, ref - STEP_TURN)
+        self.step_hold = step_hold
+        self.turn_since: float | None = None  # the head turned past `step_at` since then
         self.step = 0  # a tile to step this frame: -1 left, 1 right, 0 none
         self.turned = 0  # stepped that way: the head has to come back first
         # jumps so far: a late answer of where one should have landed (`snap_to`) is only
@@ -164,10 +188,8 @@ class Pointer:
                 return None
             self.hand_until, self.hand_gaze = None, gaze.copy()  # stopped: kept until you look away
         if not self.released and self.head_step(head):
-            return None  # turned to step: the pointer stays (the eyes model reads the turn too)
-        # where you look, the head counted too (the eyes model has it still, where it
-        # was at calibration): only for telling whether that is on the screen
-        seen = gaze - self.head_screen * (head - self.head_ref)
+            return None  # turned to step: the pointer stays (the gaze reads the turn too)
+        seen = gaze  # the gaze counts the head itself: off the screen is looking away
         if np.any(seen < -self.away) or np.any(seen > self.size - 1 + self.away):
             self.away_since = t if self.away_since is None else self.away_since
             if t - self.away_since >= self.away_time:
@@ -178,6 +200,7 @@ class Pointer:
             if np.any(seen < 0) or np.any(seen > self.size - 1):
                 return None  # back only once well on the screen, not on its edge
             self.released = False
+        self.recent.append((t, gaze.copy()))
         if self.hand_gaze is not None:
             if np.linalg.norm(gaze - self.hand_gaze) <= self.jump:
                 self.far_since = None
@@ -185,18 +208,12 @@ class Pointer:
             self.far_since = t if self.far_since is None else self.far_since
             if t - self.far_since < self.jump_time:
                 return None
-            self.hand_gaze = None
-            self.land(gaze, head)
+            self.hand_gaze, self.anchor, self.far_since = None, None, None  # the next fixation takes it
         elif self.at is None:
             self.land(gaze, head)
-        elif np.linalg.norm(gaze - self.at) > self.jump:
-            self.far_since = t if self.far_since is None else self.far_since
-            if t - self.far_since >= self.jump_time:
-                self.land(gaze, head)
-            else:
-                self.follow(head)
+        elif (fix := self.fixation(t)) is not None and (self.anchor is None or np.linalg.norm(fix - self.anchor) > self.dead):
+            self.land(fix, head)
         else:
-            self.far_since = None
             self.follow(head)
         if self.glide > 0 and self.shown is not None:
             k = 1.0 - np.exp(-max(t - self.shown_t, 0.0) / self.glide)
@@ -210,13 +227,33 @@ class Pointer:
         self.sent = px
         return px
 
+    def fixation(self, t: float) -> np.ndarray | None:
+        """Where the eyes are fixed: the mean of the gaze when it stayed within `settle` px
+        of it the last `settle_time` s, else None."""
+        if not self.recent or self.recent[0][0] > t - self.settle_time + 1e-6:
+            return None  # not that long seen yet (a gap: blinking, away)
+        pts = np.array([g for s, g in self.recent if s >= t - self.settle_time - 1e-6])
+        if len(pts) < 0.6 * self.settle_time * FPS:
+            return None  # too few frames there (blinks): not seen holding still
+        mid = pts.mean(axis=0)
+        return mid if np.all(np.linalg.norm(pts - mid, axis=1) <= self.settle) else None
+
     def land(self, gaze, head):
-        self.landed = np.clip(gaze, 0, self.size - 1)
+        """The pointer comes to rest on the gaze: a landing (dune-a11y asked, the trace)."""
+        self.came_from = None if self.at is None else self.at.copy()
+        self.landed = self.inside(gaze)
+        self.anchor = np.array(gaze, dtype=float)
         self.land_kind, self.next_kind, self.land_t = self.next_kind, "gaze", self.now
         self.land_gaze, self.snap_shift = np.array(gaze, dtype=float), None
         self.before = None
         self.landings += 1
         self.at, self.head0, self.far_since = self.landed.copy(), head, None
+
+    def follow(self, head):
+        """Between landings the head moves the pointer from where it landed."""
+        if self.head0 is None:
+            self.head0 = head
+        self.at = self.inside(self.landed - self.gain * (head - self.head0))
 
     def snap_to(self, seq: int, onto) -> bool:
         """Jump `seq` should have landed on `onto` (the button there, `snap.Near`): the
@@ -226,10 +263,10 @@ class Pointer:
             return False
         if self.released or self.elsewhere or self.hand_until is not None or self.hand_gaze is not None:
             return False
-        moved = np.clip(np.asarray(onto, dtype=float), 0, self.size - 1) - self.landed
+        moved = self.inside(onto) - self.landed
         self.landed = self.landed + moved
         self.snap_shift = moved if self.snap_shift is None else self.snap_shift + moved
-        self.at = np.clip(self.at + moved, 0, self.size - 1)
+        self.at = self.inside(self.at + moved)
         return True
 
     def state(self) -> dict:
@@ -254,12 +291,14 @@ class Pointer:
             out["before"] = said(self.before, t)
         return out
 
-    def follow(self, head):
-        self.at = np.clip(self.landed - self.gain * (head - self.head0), 0, self.size - 1)
+    def inside(self, xy) -> np.ndarray:
+        """`xy` kept where the gaze may put the pointer (`area`)."""
+        return np.clip(np.asarray(xy, dtype=float), self.area[:2], self.area[2:])
 
     def head_step(self, head) -> bool:
-        """Whether the head is turned to step the strip (`step` set on the frame it gets
-        there). Back from a step, the pointer lands where you look then."""
+        """Whether the head is turned to step the strip (`step` set on the frame it has
+        stayed there `step_hold` s; until then the head moves the pointer as ever). Back
+        from a step, the pointer lands where you look then."""
         left, right = self.step_at
         x = float(head[0])
         if self.turned:
@@ -271,9 +310,13 @@ class Pointer:
             self.next_kind = "back"
             return False
         if x >= left or x <= right:
+            self.turn_since = self.now if self.turn_since is None else self.turn_since
+            if self.now - self.turn_since < self.step_hold:
+                return False
             self.step = self.turned = -1 if x >= left else 1
-            self.far_since = None
+            self.far_since = self.turn_since = None
             return True
+        self.turn_since = None
         return False
 
 
@@ -292,6 +335,25 @@ def said(state: dict, t: float) -> dict:
     if state["snap"] is not None:
         out["snap"] = r1(state["snap"])
     return out
+
+
+def usable(layout: dict | None, size, edge_max: float = EDGE_MAX) -> np.ndarray:
+    """Where the gaze may put the pointer on a monitor (x0, y0, x1, y1), from dune's `strip`
+    `layout` of it: the tiles on the screen, each edge kept off by what they leave there
+    (the outer `gap`, a bar's band), at most `edge_max`; a tile cut by an edge (the strip
+    scrolled) leaves nothing there. No layout or no tile on the screen: all of it."""
+    w, h = float(size[0]), float(size[1])
+    full = np.array([0.0, 0.0, w - 1, h - 1])
+    view = (layout or {}).get("view", 0)  # the tiles' x is along the strip: on the screen, less the view
+    tiles = [t | {"x": t["x"] - view} for t in (layout or {}).get("tiles", [])]
+    tiles = [t for t in tiles if t["x"] < w and t["x"] + t["w"] > 0 and t["y"] < h and t["y"] + t["h"] > 0]
+    if not tiles:
+        return full
+    left = min(max(min(t["x"] for t in tiles), 0.0), edge_max)
+    top = min(max(min(t["y"] for t in tiles), 0.0), edge_max)
+    right = min(max(w - max(t["x"] + t["w"] for t in tiles), 0.0), edge_max)
+    bottom = min(max(h - max(t["y"] + t["h"] for t in tiles), 0.0), edge_max)
+    return np.array([left, top, w - 1 - right, h - 1 - bottom])
 
 
 def unzoom(gaze, zoom: dict | None):
@@ -318,44 +380,6 @@ class Filter2:
         return np.array([f(float(v), t) for f, v in zip(self.f, value)])
 
 
-def load_calibration(path: Path | None = None) -> tuple[dict, model.Model]:
-    """The saved calibration and the eyes model fitted on it."""
-    data = json.loads((path or calibration_path()).read_text())
-    return data, eyes_model(data)
-
-
-def head_fix(data: dict) -> model.HeadFix | None:
-    """The fix learnt from clicks, else the head calibration's when it did better than the
-    eyes alone, else None."""
-    if data.get("click_fix"):
-        return model.HeadFix.from_json(data["click_fix"])
-    fix = data.get("head_fix")
-    return model.HeadFix.from_json(fix) if fix and fix.get("used") else None
-
-
-def eyes_model(data: dict) -> model.Model:
-    """The eyes model fitted on a calibration's samples."""
-    w, h = data["size"]
-    rows = [s for s in data["calibration"] if s["feats"]["open"] >= BLINK]
-    targets = np.array([[s["target"][0] * w, s["target"][1] * h] for s in rows])
-    groups = np.array([s["point"] for s in rows])
-    return model.fit([s["feats"] for s in rows], targets, groups, "eyes")
-
-
-def calibration_from_run(run_path: str, output: str | None) -> int:
-    """`calibrate --from RUN.json`: the calibration points of a `measure` run, for `run`."""
-    data = json.loads(Path(run_path).read_text())
-    if not output:
-        print("say the monitor it was on: --output NAME (as in dune.toml's [output.NAME])", file=sys.stderr)
-        return 1
-    saved = {k: data[k] for k in ("size", "time", "waited", "head", "calibration") if k in data}
-    path = calibration_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(saved | {"output": output}))
-    print(f"calibration from {run_path} on {output} ({data['size'][0]}x{data['size'][1]}): {path}")
-    return 0
-
-
 def move(x: int, y: int, output: str | None):
     """`dune pointer move x y output`, straight on dune's socket (27 times a second)."""
     send(f"pointer\tmove\t{x}\t{y}\t{output or ''}")
@@ -364,15 +388,6 @@ def move(x: int, y: int, output: str | None):
 def action(name: str):
     """`dune action NAME`: what that key of `[keys]` does (`focus_left`...)."""
     send(f"action\t{name}")
-
-
-def step_turns(data: dict) -> tuple[float, float] | None:
-    """`head_x` past which the head steps the strip left / right: further than the 1%
-    most turned of the clicks (looking at the screen), by `STEP_MARGIN`. None: too few."""
-    xs = [s["feats"]["head_x"] for s in data.get("click_samples") or [] if s.get("feats")]
-    if len(xs) < STEP_CLICKS:
-        return None
-    return float(np.percentile(xs, 99)) + STEP_MARGIN, float(np.percentile(xs, 1)) - STEP_MARGIN
 
 
 def send(request: str):
@@ -385,46 +400,45 @@ def send(request: str):
 
 
 def run(args) -> int:
-    path = calibration_path()
+    path = geometric.store_path()
     if not path.exists():
         print(f"no calibration at {path}: run `dune-eye-tracker calibrate` first", file=sys.stderr)
         return 1
-    data, eyes = load_calibration(path)
-    size, output = tuple(data["size"]), data.get("output")
     try:
-        camera = Camera(args.device)
+        gz = geometric.load(path)
+    except Exception as e:
+        print(f"the calibration at {path} did not load ({e}): `dune-eye-tracker calibrate` again", file=sys.stderr)
+        return 1
+    size, output = tuple(gz.screen), gz.output
+    try:
+        camera = Camera(args.device, share=SHARE, sharing=args.share)
     except RuntimeError as e:
         print(e, file=sys.stderr)
         return 1
     stop = []
     signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
+    # `dune-eye-tracker share`: the virtual camera on, or off, for a call or dune-camera
+    signal.signal(signal.SIGUSR1, lambda *_: camera.set_sharing(not camera.sharing.is_set()))
     camera.start()
-    ref = data.get("head") or {}
-    fix = head_fix(data)
     near = Near(output, args.snap) if args.snap > 0 and output else None
     if near is not None:
         near.start()
     asked = 0  # the last jump `near` was asked about
     around: tuple[int, list] | None = None  # what dune-a11y said is around that jump
     zoom = None  # dune's zoom on this monitor while it is in (a `zoom` line)
-    # with the head calibration the gaze already counts the head: "off the screen" too
-    pointer = Pointer(
-        size,
-        head_gain=args.head_gain,
-        head_ref=(ref.get("head_x", 0.0), ref.get("head_y", 0.0)),
-        head_screen=0.0 if fix else HEAD_SCREEN,
-        glide=args.glide,
-        step_at=step_turns(data),
-    )
+    pointer = Pointer(size, head_gain=args.head_gain, head_ref=gz.head_ref(), glide=args.glide, step_at=gz.step_turns())
     gaze_f, head_f = Filter2(GAZE_FILTER), Filter2(HEAD_FILTER)
-    learner = ClickLearner(data, eyes, fix, path)
+    learner = geometric.GazeLearner(gz, path)
     clicks = Clicks()
     clicks.start()
     puts = Puts(output) if output else None
     if puts is not None:
         puts.start()
     last_seq, moves, since = 0, 0, time.monotonic()
+    shared = None  # what the camera said of sharing, once
+    trace = Trace(state_dir() / TRACE_LOG if args.trace else None)  # why the pointer moved (`trace`)
+    layout = None  # dune's last `strip` layout of this monitor: where the gaze may put the pointer
 
     def moment(t: float) -> dict:
         """What a geometric model of clicks needs that the click line does not say: how
@@ -440,14 +454,20 @@ def run(args) -> int:
             out["around"] = around[1]
         return out
 
-    if data.get("click_fix"):
-        c = data["click_fix"]
-        with_head = f", learnt from {c['clicks']} clicks ({c['after']:.0f} px off on the last ones)"
-    elif fix:
-        with_head = f", the head too ({data['head_fix']['fixed']:.0f} px off, eyes alone {data['head_fix']['alone']:.0f})"
-    else:
-        with_head = ""
-    print(f"driving the pointer on {output} ({size[0]}x{size[1]}); calibrated {data['time']}{with_head}", flush=True)
+    def click(t: float, x: int, y: int, out: str, ctx: dict | None, how: dict) -> str:
+        """A click: learnt from (its frames a point, `gaze.GazeLearner`) and logged; the
+        shift said when it moves."""
+        note = learner.shift_note
+        said = learner.click(t, x, y, out, how.get("by"), how | {"hand": pointer.hand_now(t)} | moment(t) | ({"ctx": ctx} if ctx else {}))
+        if learner.shift_note != note:
+            print(f"gaze: {learner.shift_note}", flush=True)
+            trace.event(t, "shift", note=learner.shift_note, offset=[round(float(v), 1) for v in learner.g.offset])
+        return said
+
+    clicks_n = len(np.unique(gz.rec.point[gz.rec.block == geometric.CLICK]))
+    print(f"driving the pointer on {output} ({size[0]}x{size[1]}); calibrated {gz.time} ({gz.model.name}, "
+          f"{len(np.unique(gz.rec.point[gz.rec.block == 0]))} points, {clicks_n} clicks)", flush=True)
+    print(f"the clicks keep it fitted: {learner.shift_note}", flush=True)
     if near is not None:
         print(near.error or f"landing on buttons within {args.snap:g} px (dune-a11y, asked at each jump)", flush=True)
     left, right = pointer.step_at
@@ -457,19 +477,27 @@ def run(args) -> int:
             if camera.error:
                 print(camera.error, file=sys.stderr)
                 return 1
-            sample = camera.sample()
+            if camera.shared != shared:
+                shared = camera.shared
+                print(shared, flush=True)
+                notify(f"eye tracker: {shared}")
+            sample = camera.frame()
             if sample.seq == last_seq:
                 time.sleep(0.005)
                 continue
             last_seq = sample.seq
+            if (now_layout := clicks.focus.strips.get(output)) is not layout:
+                layout = now_layout
+                pointer.area = usable(layout, size)
             for _, t, x, y in puts.pending() if puts is not None else ():
                 # dune-a11y clicked something there (by voice, "click on X"): a click the
                 # least trusted (`clicks.WEIGHTS`), you looked at it somewhere; then the
                 # pointer onto it, left there as the mouse leaves it, until you look elsewhere
-                said = learner.click(t, x, y, output, None, {"by": "name", "button": "left", "hand": pointer.hand_now(t)} | moment(t))
+                said = click(t, x, y, output, None, {"by": "name", "button": "left"})
                 if args.verbose:
                     print(f"click on {x} {y} (dune-a11y): {said}", flush=True)
                 pointer.hand(t, (x, y), "put")
+                trace.event(t, "put", at=[x, y])
                 try:
                     move(x, y, output)
                 except OSError as e:
@@ -480,33 +508,31 @@ def run(args) -> int:
             for change, t, x, y, out, ctx, how in clicks.pending():
                 if change == "zoom":
                     if out == output:
-                        # magnified: the gaze mapped back, the head and the jumps 1/scale
+                        # magnified: the gaze mapped back, the head, its wobble and the hand's jump 1/scale
                         zoom = ctx
+                        trace.event(t, "zoom", scale=zoom["scale"] if zoom else 1)
                         z = zoom["scale"] if zoom else 1
-                        pointer.gain, pointer.jump = args.head_gain / z, JUMP / z
+                        pointer.gain, pointer.dead, pointer.settle, pointer.jump = args.head_gain / z, DEAD / z, SETTLE / z, JUMP / z
                         if args.verbose:
                             print(f"zoom {'in x' + str(z) if zoom else 'out'}", flush=True)
                     continue
                 if change == "move":
                     pointer.hand(t, (x, y) if out == output else None)
                     continue
-                said = learner.click(t, x, y, out, ctx, how | {"hand": pointer.hand_now(t)} | moment(t))
+                said = click(t, x, y, out, ctx, how)
                 if args.verbose:
                     print(f"click {x} {y} {out}: {said}", flush=True)
             if note := learner.refit_background():  # fits in a thread: the pointer goes on
-                print(note, flush=True)
-                if learner.fix is not fix:  # the new fix: gaze, and "off the screen", from it
-                    fix = learner.fix
-                    pointer.head_screen = 0.0
+                print(f"gaze: {note}", flush=True)
+                trace.event(sample.t, "fit", note=note)
             feats = sample.feats
             if feats is None:
                 continue
-            learner.seen(sample.t, feats)
-            if feats["open"] < BLINK:
+            learner.seen(sample)
+            guess = gz.predict([sample]) if feats["open"] >= BLINK else None  # unclipped: off the screen is how looking away shows
+            if guess is None:  # blinking, or no iris found this frame: the pointer stays
+                trace.frame(sample.t, None, None, (feats["head_x"], feats["head_y"]), pointer.shown, pointer.released, feats["open"])
                 continue
-            guess = eyes.predict([feats])  # unclipped: off the screen counts
-            if fix:
-                guess = fix.correct(guess, [feats])
             gaze = gaze_f(guess[0], sample.t)
             head = head_f((feats["head_x"], feats["head_y"]), sample.t)
             was_released = pointer.released
@@ -514,9 +540,16 @@ def run(args) -> int:
                 for seq, onto, found in near.answers():  # where a jump should have landed
                     if found is not None:
                         around = (seq, found)
-                    if onto is not None and pointer.snap_to(seq, onto) and args.verbose:
-                        print(f"jump {seq} onto {onto[0]:.0f} {onto[1]:.0f}", flush=True)
+                    if onto is not None and pointer.snap_to(seq, onto):
+                        trace.event(sample.t, "snap", jump=seq, onto=[round(float(onto[0])), round(float(onto[1]))])
+                        if args.verbose:
+                            print(f"jump {seq} onto {onto[0]:.0f} {onto[1]:.0f}", flush=True)
+            landings = pointer.landings
             px = pointer.update(sample.t, unzoom(gaze, zoom), head)
+            trace.frame(sample.t, guess[0], gaze, head, pointer.shown, pointer.released, feats["open"])
+            if pointer.landings != landings and trace.jump(sample.t, pointer.land_kind, pointer.came_from, pointer.landed, guess[0]):
+                j = trace.lines[-1]
+                print(f"bounce: to {j['went']} and back to {j['to']} after {j['back_after']} s (trace.jsonl)", flush=True)
             if near is not None and zoom is None and pointer.landings != asked and pointer.landed is not None:
                 asked = pointer.landings  # a new jump: what is there? (answered in a few ms)
                 near.ask(asked, *pointer.landed)
@@ -588,6 +621,18 @@ def notify(text: str):
         pass
 
 
+def share(args) -> int:
+    """Turn the virtual camera on, or off, in the `run` going (SIGUSR1): other programs
+    read the webcam there while the pointer goes on."""
+    pid = running()
+    if not pid:
+        print("the tracker is not running: the webcam is free, no need to share it", file=sys.stderr)
+        notify("eye tracker: not running, the webcam is free")
+        return 1
+    os.kill(pid, signal.SIGUSR1)
+    return 0
+
+
 def toggle(args) -> int:
     """Stop the `run` going, else start one in the background (with no calibration yet:
     `calibrate` first)."""
@@ -605,7 +650,7 @@ def toggle(args) -> int:
         pid_path().unlink(missing_ok=True)
         notify("eye tracker: off")
         return 0
-    command = "run" if calibration_path().exists() else "calibrate"
+    command = "run" if geometric.store_path().exists() else "calibrate"
     log = state_dir() / f"{command}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "ab") as out:
